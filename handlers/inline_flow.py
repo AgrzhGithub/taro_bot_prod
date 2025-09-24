@@ -12,7 +12,7 @@ from datetime import datetime, date
 from sqlalchemy import select
 
 from keyboards_inline import (
-    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline
+    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline
 )
 from config import ADMIN_USERNAME
 from services.tarot_ai import draw_cards, gpt_make_prediction
@@ -286,7 +286,7 @@ async def show_profile(cb: CallbackQuery):
            f"{pass_line}\n\n"
            f"🔗 Ваш реферальный код: {user.invite_code}\n"
            f"▶️ Ссылка для приглашений:\n{link}")
-    await cb.message.edit_text(txt, reply_markup=main_menu_inline())
+    await cb.message.edit_text(txt, reply_markup=promo_inline())
 
 
 # ---------- покупка (кредиты + PASS) ----------
@@ -309,6 +309,7 @@ async def buy_pick(cb: CallbackQuery, bot: Bot):
 
     parts = cb.data.split(":")
     kind = parts[1]  # "credits" | "pass30"
+    print(parts)
 
     if kind == "credits":
         credits = int(parts[2])

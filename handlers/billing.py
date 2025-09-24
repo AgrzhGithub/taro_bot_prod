@@ -9,9 +9,9 @@ router = Router()
 # клавиатура выбора пакета
 buy_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="10 сообщений — 100₽")],
-        [KeyboardButton(text="30 сообщений — 250₽")],
-        [KeyboardButton(text="50 сообщений — 400₽")],
+        [KeyboardButton(text="5 сообщений — 149₽")],
+        [KeyboardButton(text="10 сообщений — 249₽")],
+        [KeyboardButton(text="30 сообщений — 549₽")],
         [KeyboardButton(text="⬅️ В меню")]
     ],
     resize_keyboard=True
@@ -21,17 +21,17 @@ buy_kb = ReplyKeyboardMarkup(
 async def buy_start(message: Message):
     await message.answer("Выберите пакет сообщений:", reply_markup=buy_kb)
 
-@router.message(lambda msg: msg.text in ["10 сообщений — 100₽", "30 сообщений — 250₽", "50 сообщений — 400₽"])
+@router.message(lambda msg: msg.text in ["5 сообщений — 149₽", "10 сообщений — 249₽", "30 сообщений — 549₽"])
 async def buy_package(message: Message):
     tg_id = message.from_user.id
     user = await ensure_user(tg_id, message.from_user.username)
 
-    if message.text.startswith("10"):
-        credits, price = 10, 100
-    elif message.text.startswith("30"):
-        credits, price = 30, 250
+    if message.text.startswith("5"):
+        credits, price = 5, 149
+    elif message.text.startswith("10"):
+        credits, price = 10, 249
     else:
-        credits, price = 50, 400
+        credits, price = 30, 549
 
     # фейковая оплата — просто начисляем кредиты
     await grant_credits(user.id, credits, reason=f"fake_payment_{price}")

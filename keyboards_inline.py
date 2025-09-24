@@ -32,9 +32,9 @@ def spread_inline() -> InlineKeyboardMarkup:
 
 def buy_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="5 сообщений — 149₽", callback_data="buy:5:14900")],
-        [InlineKeyboardButton(text="10 сообщений — 399₽", callback_data="buy:10:30000")],
-        [InlineKeyboardButton(text="30 сообщений — 599₽", callback_data="buy:30:59900")],
+        [InlineKeyboardButton(text="5 сообщений — 149₽", callback_data="buy:credits:5:14900")],
+        [InlineKeyboardButton(text="10 сообщений — 399₽", callback_data="buy:credits:10:39900")],
+        [InlineKeyboardButton(text="30 сообщений — 599₽", callback_data="buy:credits:30:59900")],
         [InlineKeyboardButton(text="Подписка (30 дней) — 599₽", callback_data="buy:pass30:59900")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
@@ -49,5 +49,11 @@ def daily_inline():
         [InlineKeyboardButton(text="🗓 Подписаться на карту дня", callback_data="daily:on")],
         [InlineKeyboardButton(text="❌ Отписаться от карты дня", callback_data="daily:off")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+    ])
+
+def promo_inline():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="menu:promo")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:profile")],
     ])
 

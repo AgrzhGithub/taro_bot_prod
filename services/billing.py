@@ -234,11 +234,11 @@ async def pass_can_spend(tg_id: int) -> Tuple[bool, str, Optional[int]]:
 
     row = await _get_latest_active_pass_by_tg(tg_id)
     if not row:
-        return False, "PASS не активен", None
+        return False, "Подписка не активна", None
 
     sp, user = row
     if not sp.expires_at or sp.expires_at < now:
-        return False, "Срок PASS истёк", None
+        return False, "Срок действия подписки истёк", None
 
     async with SessionLocal() as s:
         res2 = await s.execute(select(PassUsage).where(PassUsage.user_id == user.id, PassUsage.day == today))
@@ -250,7 +250,7 @@ async def pass_can_spend(tg_id: int) -> Tuple[bool, str, Optional[int]]:
             if (now - pu.last_ts).total_seconds() < min_interval:
                 return False, "Слишком часто. Попробуйте через минуту.", pu.used
             if pu.used >= DAY_LIMIT:
-                return False, f"Дневной лимит PASS исчерпан ({DAY_LIMIT}).", pu.used
+                return False, f"Дневной лимит подписки исчерпан ({DAY_LIMIT}).", pu.used
             return True, "", pu.used
 
         # ещё не тратили сегодня
