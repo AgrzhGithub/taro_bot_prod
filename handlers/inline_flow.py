@@ -1,4 +1,5 @@
 # handlers/inline_flow.py
+from services import tarot_ai
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -15,7 +16,7 @@ from keyboards_inline import (
     main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline
 )
 from config import ADMIN_USERNAME
-from services.tarot_ai import draw_cards, gpt_make_prediction
+from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario
 from services.billing import (
     ensure_user, get_user_balance, redeem_promocode,
     build_invite_link, grant_credits, activate_pass_month,
@@ -177,8 +178,10 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
 
     try:
+        # Вопрос формулируем жёстко под тему, чтобы LLM не «размывало» контекст
         prediction = await gpt_make_prediction(
-            question=f"Предсказание на тему '{theme}'",
+            question=f"Сделай интерпретацию СТРОГО по теме «{theme}». "
+                     f"Связывай значения карт только с этой темой, без общих советов про финансы/работу, если тема иная.",
             theme=theme,
             spread=spread,
             cards_list=cards_list
@@ -406,10 +409,7 @@ async def successful_payment(message: Message):
     await message.answer("✅ Оплата получена.", reply_markup=main_menu_inline())
 
 
-
-
-#обратная связь
-
+# ---------- обратная связь ----------
 @router.callback_query(F.data == "menu:feedback")
 async def feedback_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -437,7 +437,6 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
         "Напишите ваше сообщение (и нажмите Start, если чат открывается впервые)."
     )
     await cb.message.edit_text(text, reply_markup=kb)
-
 
 
 # ---------- глушилка на случай «эхо» старых Reply-кнопок ----------

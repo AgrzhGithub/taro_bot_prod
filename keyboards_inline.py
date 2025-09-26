@@ -57,3 +57,10 @@ def promo_inline():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
 
+def scenario_inline(theme_id: str, scenarios: list) -> InlineKeyboardMarkup:
+    # scenarios — список объектов с полями .id и .title
+    rows = []
+    for s in scenarios:
+        rows.append([InlineKeyboardButton(text=s.title, callback_data=f"scen:select:{theme_id}:{s.id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К темам", callback_data="nav:theme")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
