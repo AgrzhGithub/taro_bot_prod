@@ -54,6 +54,6 @@ def daily_inline():
 def promo_inline():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="menu:promo")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:profile")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
 
