@@ -13,10 +13,10 @@ from datetime import datetime, date
 from sqlalchemy import select
 
 from keyboards_inline import (
-    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline
+    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline_limits
 )
 from config import ADMIN_USERNAME
-from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario
+from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario, gpt_make_advice_from_yandex_answer
 from services.billing import (
     ensure_user, get_user_balance, redeem_promocode,
     build_invite_link, grant_credits, activate_pass_month,
@@ -217,7 +217,7 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     )
 
     # показываем две кнопки "Обычный совет (1)" и "Расширенный совет (3)"
-    await cb.message.edit_text(prediction, reply_markup=advice_inline())
+    await cb.message.edit_text(prediction, reply_markup=advice_inline_limits(True, True))
 
     # ВАЖНО: НЕ ОЧИЩАЕМ state здесь, иначе советы не сработают
     # await state.clear()  # <-- удалить/закомментировать
@@ -225,46 +225,45 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.in_({"advice:1", "advice:3"}))
-async def advice_handler(cb: CallbackQuery, state: FSMContext):
+async def advice_handler(cb: CallbackQuery):
     await cb.answer()
-    data = await state.get_data()
-    last_cards = data.get("last_cards")
-    last_itog = data.get("last_itog")
-    theme = data.get("last_theme")
-    spread = data.get("last_spread")
-    question = data.get("last_question")
 
-    if not (last_cards and theme and question):
-        await cb.message.edit_text(
-            "Чтобы получить совет, сначала сделайте расклад.", 
-            reply_markup=main_menu_inline()
-        )
-        return
+    # Определяем, что нажали — 1 или 3
+    is_one = (cb.data == "advice:1")
+    advice_count = 1 if is_one else 3
 
-    # сколько карт совета тянем
-    advice_count = 1 if cb.data == "advice:1" else 3
+    # Берем исходный показанный пользователю ответ Яндекса прямо из сообщения
+    yandex_answer = cb.message.text or ""
 
-    # Доп. карты для Совета
-    advice_cards = tarot_ai.draw_cards(advice_count)
-    advice_card_names = [c["name"] for c in advice_cards]
-
+    # Тянем доп. карты для совета и печатаем их в ответе
     try:
-        advice_text = await tarot_ai.gpt_make_advice(
-            theme=theme,
-            scenario_ctx=None,                 # если ты сохраняешь уточнение в FSM — подставь сюда
-            question=question,
-            cards_list=last_cards,
-            summary_text=(last_itog or ""),
+        advice_cards = draw_cards(advice_count)
+        advice_card_names = [c["name"] for c in advice_cards]
+    except Exception:
+        advice_card_names = []
+
+    # Генерируем совет (для 3 карт — длиннее)
+    try:
+        advice_text = await gpt_make_advice_from_yandex_answer(
+            yandex_answer_text=yandex_answer,
             advice_cards_list=advice_card_names,
+            advice_count=advice_count,
         )
     except Exception as e:
         advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-    # выводим совет (оставим те же кнопки, чтобы можно было взять другой вариант)
-    await cb.message.edit_text(advice_text, reply_markup=advice_inline())
+    # Теперь рендерим новую клавиатуру:
+    # - Если только что нажали 1 карту: оставляем доступной ТОЛЬКО 3 карты.
+    # - Если только что нажали 3 карты: убираем обе (использованы оба варианта).
+    if is_one:
+        new_kb = advice_inline_limits(allow_one=False, allow_three=True)
+    else:
+        new_kb = advice_inline_limits(allow_one=False, allow_three=False)
 
+    # Пишем совет на место текущего сообщения и показываем обновлённые кнопки (без уже использованной опции)
+    await cb.message.edit_text(advice_text, reply_markup=new_kb)
 
-
+    
 # ---------- свой вопрос ----------
 @router.callback_query(F.data == "menu:custom")
 async def custom_start(cb: CallbackQuery, state: FSMContext):

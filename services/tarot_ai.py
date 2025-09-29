@@ -513,3 +513,47 @@ async def gpt_make_advice(
 
     raw = await qwen_chat_completion(prompt)
     return _sanitize_plain_text(raw)
+
+
+async def gpt_make_advice_from_yandex_answer(
+    *,
+    yandex_answer_text: str,
+    advice_cards_list: list[str] | None,
+    advice_count: int = 1,
+) -> str:
+    """
+    Генерирует совет на основе уже полученного текста от Яндекса.
+    Для 1 карты — краткий совет, для 3 карт — подробный и длинный.
+    В начале всегда выводим строку: 'Совет — карты: ...'
+    """
+    # Явно формируем строку с картами
+    if advice_cards_list:
+        cards_line_for_prompt = f"Совет — карты: {', '.join(advice_cards_list)}\n"
+    else:
+        cards_line_for_prompt = "Совет — карты: (если нет — пропусти эту строку)\n"
+
+    # Настройки длины совета
+    if advice_count == 3:
+        guidance = "Сделай связный, практичный и развёрнутый совет на 8–15 предложений."
+    else:
+        guidance = "Сделай краткий, практичный совет на 3–5 предложений."
+
+    prompt = f"""
+Ты — таролог. Сформируй ПРАКТИЧНЫЙ совет на основе уже готового ответа от Яндекса ниже.
+Не переписывай весь расклад, опирайся прежде всего на раздел «Итог» и общий смысл ответа.
+Стиль — спокойный, связный и конкретный. Избегай маркдауна, списков и эмодзи.
+
+{guidance}
+Если передан список «карты совета», обязательно учти их при формировании рекомендаций.
+
+Выведи результат строго в таком формате:
+{cards_line_for_prompt}Текст совета.
+
+Ответ Яндекса:
+---
+{yandex_answer_text}
+---
+""".strip()
+
+    raw = await qwen_chat_completion(prompt)
+    return _sanitize_plain_text(raw)
