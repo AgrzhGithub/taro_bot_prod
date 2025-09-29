@@ -13,7 +13,7 @@ from datetime import datetime, date
 from sqlalchemy import select
 
 from keyboards_inline import (
-    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline
+    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline
 )
 from config import ADMIN_USERNAME
 from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario
@@ -150,9 +150,18 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     spread = cb.data.split(":", 1)[1]
     data = await state.get_data()
-    theme = data.get("theme", "Общая")
 
-    # Списываем доступ (PASS/кредит) — только при запуске расклада
+    theme = data.get("theme", "Общая")
+    scenario_ctx = data.get("scenario_ctx")  # сохраняем уточнение темы, если было
+    # ВОПРОС ПОЛЬЗОВАТЕЛЯ: берём из FSM (как ты его туда клал при вводе)
+    user_question = (
+        data.get("user_question")
+        or data.get("question")
+        or data.get("last_question")
+        or ""
+    )
+
+    # списываем доступ — без изменений
     ok, src = await spend_one_or_pass(cb.from_user.id)
     if not ok:
         if src == "pass_rate_limit":
@@ -164,6 +173,7 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
+    # тягаем карты под выбранный расклад — как у тебя
     if spread == "Три карты":
         cards = draw_cards(3)
     elif spread == "Подкова":
@@ -173,29 +183,86 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     else:
         cards = draw_cards(3)
 
-    names = _card_names(cards)
-    cards_list = ", ".join(names)
+    names = _card_names(cards)                 # список имён для сохранения и совета
+    cards_list = ", ".join(names)              # строка — как ты сейчас передаёшь в gpt
     await cb.message.edit_text(f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
 
     try:
-        # Вопрос формулируем жёстко под тему, чтобы LLM не «размывало» контекст
+        # ВАЖНО: в question передаём ВОПРОС ПОЛЬЗОВАТЕЛЯ, а инструкции остаются в prompt внутри gpt-функции
         prediction = await gpt_make_prediction(
-            question=f"Сделай интерпретацию СТРОГО по теме «{theme}». "
-                     f"Связывай значения карт только с этой темой, без общих советов про финансы/работу, если тема иная.",
+            question=user_question,
             theme=theme,
             spread=spread,
-            cards_list=cards_list
+            cards_list=cards_list,     # если твоя функция принимает строку — оставляем строку
+            scenario_ctx=scenario_ctx,
         )
-    except Exception:
-        prediction = "⚠️ Не удалось получить толкование. Попробуйте ещё раз позже."
+    except Exception as e:
+        prediction = f"⚠️ Не удалось получить толкование: {e}"
 
+    # лог в БД — как было
     user = await ensure_user(cb.from_user.id, cb.from_user.username)
     async with SessionLocal() as s:
         s.add(models.SpreadLog(user_id=user.id, theme=theme, spread=spread, cards={"cards": names}, cost=1))
         await s.commit()
 
-    await cb.message.edit_text(prediction, reply_markup=main_menu_inline())
-    await state.clear()
+    # извлекаем Итог, сохраняем контекст для кнопок «Совет»
+    itog = _extract_itog(prediction)
+    await state.update_data(
+        last_theme=theme,
+        last_spread=spread,
+        last_question=user_question,   # <-- ФИКС: сохраняем определённый вопрос
+        last_cards=names,              # список имён карт (нужен для совета)
+        last_itog=itog,
+        last_scenario=scenario_ctx,
+    )
+
+    # показываем две кнопки "Обычный совет (1)" и "Расширенный совет (3)"
+    await cb.message.edit_text(prediction, reply_markup=advice_inline())
+
+    # ВАЖНО: НЕ ОЧИЩАЕМ state здесь, иначе советы не сработают
+    # await state.clear()  # <-- удалить/закомментировать
+
+
+
+@router.callback_query(F.data.in_({"advice:1", "advice:3"}))
+async def advice_handler(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    last_cards = data.get("last_cards")
+    last_itog = data.get("last_itog")
+    theme = data.get("last_theme")
+    spread = data.get("last_spread")
+    question = data.get("last_question")
+
+    if not (last_cards and theme and question):
+        await cb.message.edit_text(
+            "Чтобы получить совет, сначала сделайте расклад.", 
+            reply_markup=main_menu_inline()
+        )
+        return
+
+    # сколько карт совета тянем
+    advice_count = 1 if cb.data == "advice:1" else 3
+
+    # Доп. карты для Совета
+    advice_cards = tarot_ai.draw_cards(advice_count)
+    advice_card_names = [c["name"] for c in advice_cards]
+
+    try:
+        advice_text = await tarot_ai.gpt_make_advice(
+            theme=theme,
+            scenario_ctx=None,                 # если ты сохраняешь уточнение в FSM — подставь сюда
+            question=question,
+            cards_list=last_cards,
+            summary_text=(last_itog or ""),
+            advice_cards_list=advice_card_names,
+        )
+    except Exception as e:
+        advice_text = f"⚠️ Не удалось получить совет: {e}"
+
+    # выводим совет (оставим те же кнопки, чтобы можно было взять другой вариант)
+    await cb.message.edit_text(advice_text, reply_markup=advice_inline())
+
 
 
 # ---------- свой вопрос ----------
@@ -249,7 +316,8 @@ async def custom_receive(message: Message, state: FSMContext):
         await s.commit()
 
     await message.answer(prediction, reply_markup=main_menu_inline())
-    await state.clear()
+    await state.update_data(user_question=message.text.strip())
+    #await state.clear()
 
 
 # ---------- промокод ----------
@@ -437,6 +505,27 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
         "Напишите ваше сообщение (и нажмите Start, если чат открывается впервые)."
     )
     await cb.message.edit_text(text, reply_markup=kb)
+
+def _extract_itog(text: str) -> str:
+    """
+    Возвращает текст раздела 'Итог' из сгенерированного ответа.
+    Если 'Итог' не найден, возвращает пустую строку.
+    """
+    if not text:
+        return ""
+    # Ищем строку, начинающуюся на "Итог:"
+    lines = text.splitlines()
+    itog_idx = next((i for i, line in enumerate(lines) if line.strip().lower().startswith("итог")), None)
+    if itog_idx is None:
+        # иногда модель пишет "Итог — ..." без двоеточия
+        itog_idx = next((i for i, line in enumerate(lines) if "итог" in line.strip().lower()), None)
+    if itog_idx is None:
+        return ""
+
+    # Берем всё после строки с "Итог"
+    tail = [s for s in lines[itog_idx+1:] if s.strip()]
+    return " ".join(tail).strip()
+
 
 
 # ---------- глушилка на случай «эхо» старых Reply-кнопок ----------

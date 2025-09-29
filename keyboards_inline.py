@@ -64,3 +64,11 @@ def scenario_inline(theme_id: str, scenarios: list) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=s.title, callback_data=f"scen:select:{theme_id}:{s.id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К темам", callback_data="nav:theme")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def advice_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧭 Обычный совет (1 карта)", callback_data="advice:1")],
+        [InlineKeyboardButton(text="🔮 Расширенный совет (3 карты)", callback_data="advice:3")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+    ])
+

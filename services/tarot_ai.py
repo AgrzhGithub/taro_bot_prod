@@ -316,6 +316,98 @@ async def gpt_analyze_question(question: str) -> Dict[str, str]:
     else:
         return {"theme": "судьба", "spread": "Три карты", "reason": "Ошибка парсинга"}
 
+def _sanitize_plain_text(text: str) -> str:
+    """
+    Убирает маркдаун и маркеры списков (*, -, • и т.п.), оставляя обычный текст.
+    Сохраняет нумерацию вида '1) ...', '2) ...'.
+    """
+    if not isinstance(text, str):
+        return text
+
+    # уберём жирный/курсив (**...**, *...*, __...__)
+    text = text.replace("**", "").replace("__", "")
+
+    # построчная очистка маркеров
+    cleaned_lines = []
+    for line in text.splitlines():
+        raw = line.lstrip()
+        # если начинается с Markdown-маркеров списка — удаляем маркер
+        for marker in ("* ", "- ", "• ", "— ", "・ ", "∙ ", "→ ", "> "):
+            if raw.startswith(marker):
+                raw = raw[len(marker):]
+                break
+        # иногда модели делают "*— " или "*- " и т.п.
+        if raw.startswith(("*— ", "*- ", "*• ", "-• ", "•- ")):
+            raw = raw[2:].lstrip()
+
+        cleaned_lines.append(raw)
+
+    # сжать лишние пустые строки
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+def _enforce_summary_no_advice(text: str) -> str:
+    """
+    Делает 'Итог' фактическим резюме без советов/инструкций.
+    Убирает фразы с типовыми 'советными' маркерами только в блоке 'Итог'.
+    """
+    if not isinstance(text, str):
+        return text
+
+    lines = text.splitlines()
+    # ищем начало Итога (варианты написания)
+    itog_idx = None
+    for i, ln in enumerate(lines):
+        ln_low = ln.strip().lower()
+        if ln_low.startswith("итог:") or ln_low == "итог":
+            itog_idx = i
+            break
+    if itog_idx is None:
+        return text  # нет явного Итога — ничего не меняем
+
+    # Собираем текст Итога
+    head = lines[:itog_idx+1]
+    tail = lines[itog_idx+1:]
+
+    # склеим tail в один абзац для обработки предложений
+    tail_text = " ".join(s.strip() for s in tail if s.strip())
+    if not tail_text:
+        return text
+
+    # ключевые слова/формы, указывающие на совет/инструкцию
+    ADVICE_HINTS = [
+        "совет", "советую", "рекоменд", "стоит", "следует", "лучше",
+        "нужно", "необходимо", "постарайтесь", "попробуйте", "попробуй",
+        "сделайте", "сделай", "возьмите", "берите", "договоритесь",
+        "оформите", "попросите", "перестаньте", "начните", "уделите",
+        "сосредоточьтесь", "подумайте", "избегайте", "продолжайте",
+        "не забывайте", "держитесь", "планируйте", "добейтесь"
+    ]
+
+    # разбиение на предложения
+    sentences = re.split(r"(?<=[\.\!\?])\s+", tail_text)
+    cleaned_sentences = []
+    for s in sentences:
+        low = s.strip().lower()
+        if not low:
+            continue
+        # выкидываем явные «советы»
+        if any(h in low for h in ADVICE_HINTS):
+            continue
+        cleaned_sentences.append(s.strip())
+
+    # если всё выпилили — оставим краткое резюме (без команды)
+    if not cleaned_sentences:
+        cleaned_sentences = ["Краткое резюме карт: события и тенденции, вытекающие из расклада."]
+
+    new_tail_text = " ".join(cleaned_sentences).strip()
+    new_text = "\n".join(head + [new_tail_text])
+    # финальная чистка лишних пустых строк
+    new_text = re.sub(r"\n{3,}", "\n\n", new_text).strip()
+    return new_text
+
+
 # ===================== ГЛАВНАЯ: ПРЕДСКАЗАНИЕ С ЖЁСТКОЙ ПРИВЯЗКОЙ К СЦЕНАРИЮ =====================
 async def gpt_make_prediction(
     question: str,
@@ -325,37 +417,99 @@ async def gpt_make_prediction(
     scenario_ctx: Optional[str] = None
 ) -> str:
     """
-    1) Собираем строгие system+user с темой и уточнением (или авто-детектим его по вопросу).
-    2) Проверяем ответ хардчекером; если оффтоп — один ретрай с усилением ограничений.
+    Строгий промпт одной репликой: фиксируем тему и (если есть) уточняющий сценарий.
+    Жёсткий запрет на маркдаун/маркеры и на советы в 'Итоге'.
+    После ответа: чистим маркдаун и удаляем советные фразы именно из 'Итога'.
     """
-    scenario = scenario_ctx or _auto_detect_scenario(question, theme)
+    scenario_line = f"\nУточняющий сценарий: {scenario_ctx}" if scenario_ctx else ""
 
-    # Первый вызов — обычный строгий
-    msgs = _build_messages_for_prediction(
-        question=question, theme=theme, spread=spread, cards_list=cards_list, scenario_ctx=scenario, stricter=False
-    )
-    text1 = await qwen_chat_completion_messages(msgs, temperature=YANDEX_TEMPERATURE)
+    if theme.lower().startswith("любов"):
+        forbid = "финансы/карьера/здоровье/юридические советы"
+        must = "говори о чувствах, динамике отношений, совместимости, перспективах пары"
+        tone = "эмпатичный, деликатный, предметный"
+    elif theme.lower().startswith("работ"):
+        forbid = "любовные темы/здоровье/общие фразы про «все сферы жизни»"
+        must = "фокус на карьере, росте/повышении, KPI, переговорах, видимости заслуг"
+        tone = "деловой, конкретный, практичный"
+    elif theme.lower().startswith("саморазв"):
+        forbid = "узкая любовь/работа без привязки к развитию"
+        must = "привычки, навыки, мышление, дисциплина, ресурсы"
+        tone = "поддерживающий, структурный"
+    else:  # Судьба или прочее
+        forbid = "узкая любовь/работа, если не связано с жизненным путём"
+        must = "долгосрочные тренды жизни, личные уроки, трансформации"
+        tone = "взвешенный, спокойный"
 
-    ok, reason = _topic_check(text1, theme, scenario)
-    if ok:
-        return text1
+    prompt = f"""
+Ты — опытный таролог. Отвечай на русском, чётко и по делу.
+Строго соблюдай тему и не уходи в другие сферы.
 
-    # РЕТРАЙ (один раз): усиливаем запреты, понижаем температуру
-    retry_note = (
-        f"Предыдущий ответ ушёл от темы/уточнения ({reason}). "
-        f"Сконцентрируйся на теме «{theme}»"
-        + (f" и уточнении «{scenario}»." if scenario else ".")
-        + " Удали всё, что не относится к теме/уточнению."
-    )
-    msgs2 = _build_messages_for_prediction(
-        question=question + " " + retry_note,
-        theme=theme,
-        spread=spread,
-        cards_list=cards_list,
-        scenario_ctx=scenario,
-        stricter=True
-    )
-    text2 = await qwen_chat_completion_messages(msgs2, temperature=0.2)
+Тема: {theme}{scenario_line}
+Расклад: {spread}
+Карты (в порядке): {cards_list}
+Вопрос пользователя: {question}
 
-    ok2, _ = _topic_check(text2, theme, scenario)
-    return text2 if ok2 else text1  # вернём лучший из двух
+Требования по теме:
+- Обязательно: {must}.
+- Запрещено: {forbid}.
+- Тон: {tone}.
+
+ЖЁСТКИЕ ограничения по оформлению:
+- НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ИСПОЛЬЗУЙ символы списков и маркдаун: *, -, •, —, >, буллеты, нумерацию markdown, заголовки, жирный/курсив.
+- Выводи обычный текст абзацами. Допустима только нумерация формата "1) ...", "2) ...", без маркеров.
+
+Формат:
+1) Для каждой карты: «Название — краткое толкование» СТРОГО в контексте темы{(' и уточнения' if scenario_ctx else '')}.
+2) Итог: это КРАТКОЕ РЕЗЮМЕ СМЫСЛА КАРТ без советов/рекомендаций/инструкций.
+   В 'Итоге' ЗАПРЕЩЕНЫ слова и конструкции: «нужно», «стоит», «следует», «рекомендую», «совет», «сделайте», «попробуйте» и любые побудительные формулировки.
+""".strip()
+
+    raw = await qwen_chat_completion(prompt)
+    # 1) убираем маркдаун/буллеты
+    txt = _sanitize_plain_text(raw)
+    # 2) чистим 'Итог' от советов
+    txt = _enforce_summary_no_advice(txt)
+    return txt
+
+
+async def gpt_make_advice(
+    *,
+    theme: str,
+    scenario_ctx: Optional[str],
+    question: str,
+    cards_list: list[str],         # карты основного расклада (имена в порядке)
+    summary_text: str,             # текст раздела "Итог" из основного ответа
+    advice_cards_list: list[str],  # имена доп. карт, вытянутых для совета
+) -> str:
+    # Аккуратно формируем подсказку: совет основан на уже выпавших картах и их Итоге.
+    scenario_line = f"\nУточнение/сценарий: {scenario_ctx}" if scenario_ctx else ""
+    prompt = f"""
+Ты опытный таролог. Ответ только на русском, без маркдауна, буллетов и выделений.
+
+Задача: дать конкретный совет пользователю на основе уже сделанного расклада и его Итога.
+Совет должен опираться на:
+- Тему расклада и (если есть) уточняющий сценарий.
+- Список карт основного расклада (в указанном порядке).
+- Итог (резюме смысла карт без советов).
+- Дополнительные карты Совета (перечислены ниже).
+
+Формат:
+1) Сначала одной строкой перечисли карты Совета: "Совет — карты: <карта1>, <карта2>, ...".
+2) Затем короткий, предметный совет 3–6 предложений. Без общих фраз и без лишней воды. 
+   Совет должен быть практическим, но мягким по тону. Не используй списки, маркеры, эмодзи и жирный/курсив.
+
+Ограничения по стилю:
+- Никакого маркдауна, буллетов, нумерованных списков (кроме "1)" и пр. — не использовать).
+- Только обычный текст.
+- Не повторяй полностью основной Итог, а именно используй его как контекст для выведения действий.
+
+Данные:
+Тема: {theme}{scenario_line}
+Вопрос пользователя: {question}
+Карты основного расклада (по порядку): {", ".join(cards_list)}
+Итог: {summary_text}
+Карты Совета: {", ".join(advice_cards_list)}
+""".strip()
+
+    raw = await qwen_chat_completion(prompt)
+    return _sanitize_plain_text(raw)
