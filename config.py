@@ -17,3 +17,6 @@ BOT_USERNAME             = os.getenv("BOT_USERNAME", "kartataro1_bot")
 
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+
+ADVICE_BASIC_PRICE = int(os.getenv("ADVICE_BASIC_PRICE", "4900"))  # мин. единицы (копейки)
+ADVICE_CURRENCY    = os.getenv("ADVICE_CURRENCY", "RUB")
