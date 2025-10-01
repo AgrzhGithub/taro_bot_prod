@@ -75,15 +75,9 @@ def advice_inline_limits(allow_one: bool = True, allow_three: bool = True) -> In
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def confirm_buy_basic_advice_inline() -> InlineKeyboardMarkup:
+def advice_buy_inline(amount_kopecs: int) -> InlineKeyboardMarkup:
+    rub = amount_kopecs // 100
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Купить обычный совет — 49₽", callback_data="buy:advice_basic:4900")],
+        [InlineKeyboardButton(text=f"💳 Купить совет — {rub}₽", callback_data=f"buy:advice1:{amount_kopecs}")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
-
-def buy_pass30_inline() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить подписку (30 дней) — 599₽", callback_data="buy:pass30:59900")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
-    ])
-

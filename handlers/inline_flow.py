@@ -13,7 +13,8 @@ from datetime import datetime, date
 from sqlalchemy import select
 
 from keyboards_inline import (
-    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline_limits
+    main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline_limits,
+    advice_buy_inline  
 )
 from config import ADMIN_USERNAME
 from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario, gpt_make_advice_from_yandex_answer
@@ -214,6 +215,7 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
         last_cards=names,              # список имён карт (нужен для совета)
         last_itog=itog,
         last_scenario=scenario_ctx,
+        last_prediction_text=prediction,
     )
 
     # показываем две кнопки "Обычный совет (1)" и "Расширенный совет (3)"
@@ -225,24 +227,48 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.in_({"advice:1", "advice:3"}))
-async def advice_handler(cb: CallbackQuery):
+async def advice_handler(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
-    # Определяем, что нажали — 1 или 3
     is_one = (cb.data == "advice:1")
     advice_count = 1 if is_one else 3
 
-    # Берем исходный показанный пользователю ответ Яндекса прямо из сообщения
-    yandex_answer = cb.message.text or ""
+    # Проверяем подписку
+    has_pass = await pass_is_active(cb.from_user.id)
 
-    # Тянем доп. карты для совета и печатаем их в ответе
+    # Если требуется подписка (3 карты), а её нет — предлагаем купить PASS
+    if advice_count == 3 and not has_pass:
+        await cb.message.edit_text(
+            "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
+            "Оформите 30-дневный доступ и сможете пользоваться как обычным, так и расширенным советом.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[  # используем уже готовый buy:pass30
+                [InlineKeyboardButton(text="Оформить подписку — 599₽", callback_data="buy:pass30:59900")],
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+            ])
+        )
+        return
+
+    # Если обычный совет без подписки — сначала платёж
+    if advice_count == 1 and not has_pass:
+        # показываем кнопку оплаты именно после нажатия на «Обычный совет (1 карта)»
+        await cb.message.edit_text(
+            "🧭 Обычный совет — разовый платёж.\n"
+            "Нажмите кнопку ниже, чтобы оплатить и получить совет.",
+            reply_markup=advice_buy_inline(ADVICE_ONE_PRICE_KOPECKS)
+        )
+        return
+
+    # Иначе — подписка активна (или 1 карта уже оплачена не нужна) -> генерим совет сразу
+    data = await state.get_data()
+    yandex_answer = (cb.message.text or data.get("last_prediction_text") or "").strip()
+
     try:
+        # если решили тянуть доп. карты именно для совета:
         advice_cards = draw_cards(advice_count)
         advice_card_names = [c["name"] for c in advice_cards]
     except Exception:
         advice_card_names = []
 
-    # Генерируем совет (для 3 карт — длиннее)
     try:
         advice_text = await gpt_make_advice_from_yandex_answer(
             yandex_answer_text=yandex_answer,
@@ -252,15 +278,14 @@ async def advice_handler(cb: CallbackQuery):
     except Exception as e:
         advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-    # Теперь рендерим новую клавиатуру:
-    # - Если только что нажали 1 карту: оставляем доступной ТОЛЬКО 3 карты.
-    # - Если только что нажали 3 карты: убираем обе (использованы оба варианта).
+    # Логика кнопок после показа совета:
+    # - если только что сделали 1 карту: оставляем доступной 3 карты
+    # - если сделали 3 карты: обе скрываем
     if is_one:
         new_kb = advice_inline_limits(allow_one=False, allow_three=True)
     else:
         new_kb = advice_inline_limits(allow_one=False, allow_three=False)
 
-    # Пишем совет на место текущего сообщения и показываем обновлённые кнопки (без уже использованной опции)
     await cb.message.edit_text(advice_text, reply_markup=new_kb)
 
     
@@ -362,7 +387,7 @@ async def show_profile(cb: CallbackQuery):
 # ---------- покупка (кредиты + PASS) ----------
 PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
 CURRENCY = os.getenv("CURRENCY", "RUB")
-
+ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "9900")) 
 
 @router.callback_query(F.data == "menu:buy")
 async def buy_menu(cb: CallbackQuery):
@@ -392,6 +417,11 @@ async def buy_pick(cb: CallbackQuery, bot: Bot):
         title = f"Подписка (30 дней) — {amount // 100}₽"
         payload = f"pass30_{amount}"
         description = "Безлимитный месячный доступ"
+    elif kind == "advice1":  # <<< НОВОЕ
+        amount = int(parts[2])
+        title = f"Обычный совет (1 карта) — {amount // 100}₽"
+        payload = f"advice1_{amount}"
+        description = "Разовый платёж за обычный совет (1 карта)"
     else:
         await cb.message.answer("Неизвестный тип покупки.", reply_markup=main_menu_inline())
         return
@@ -413,7 +443,7 @@ async def pre_checkout(pre: PreCheckoutQuery, bot: Bot):
 
 
 @router.message(F.successful_payment)
-async def successful_payment(message: Message):
+async def successful_payment(message: Message, state: FSMContext):
     sp = message.successful_payment
     payload = sp.invoice_payload
     currency = sp.currency or CURRENCY
@@ -422,11 +452,10 @@ async def successful_payment(message: Message):
 
     user = await ensure_user(message.from_user.id, message.from_user.username)
 
-    # Создаём запись о покупке один раз (и для кредитов, и для PASS)
     purchase_id = await create_purchase(
         tg_id=message.from_user.id,
         user_id=user.id,
-        credits=0,  # уточним для credits ниже при необходимости
+        credits=0,
         amount=total_amount,
         currency=currency,
         payload=payload,
@@ -435,28 +464,49 @@ async def successful_payment(message: Message):
         meta={"raw": sp.model_dump()},
     )
 
-    if payload.startswith("credits_"):
+    # --- НОВОЕ: разовый платёж за обычный совет ---
+    if payload.startswith("advice1_"):
+        await mark_purchase_credited(purchase_id)
+
+        data = await state.get_data()
+        yandex_answer = (data.get("last_prediction_text") or "").strip()
+
         try:
-            _, credits_str, _ = payload.split("_")
-            credits = int(credits_str)
+            advice_cards = draw_cards(1)
+            advice_card_names = [c["name"] for c in advice_cards]
         except Exception:
-            credits = 0
+            advice_card_names = []
 
-        if credits > 0:
-            await grant_credits(
-                user.id, credits, reason="telegram_invoice",
-                meta={"purchase_id": purchase_id, "charge_id": charge_id}
+        try:
+            advice_text = await gpt_make_advice_from_yandex_answer(
+                yandex_answer_text=yandex_answer,
+                advice_cards_list=advice_card_names,
+                advice_count=1,
             )
-            await mark_purchase_credited(purchase_id)
-            bal = await get_user_balance(message.from_user.id)
-            note = f"\nID платежа: {charge_id}" if charge_id else ""
-            await message.answer(
-                f"✅ Оплата прошла!\nНачислено {credits}. Баланс: {bal}{note}",
-                reply_markup=main_menu_inline()
-            )
-            return
+        except Exception as e:
+            advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        await message.answer("Оплата получена, но не удалось распознать пакет.", reply_markup=main_menu_inline())
+        # после разового совета предлагай апселл — расширенный по подписке
+        await message.answer(
+            advice_text,
+            reply_markup=advice_inline_limits(allow_one=False, allow_three=True)
+        )
+        return
+    # --- /НОВОЕ ---
+
+    # Твои существующие ветки:
+    if payload.startswith("credits_"):
+        parts = payload.split("_")
+        credits = int(parts[1])
+        await grant_credits(user.id, credits, reason=f"payment_{total_amount}")
+        await mark_purchase_credited(purchase_id)
+        bal = await get_user_balance(message.from_user.id)
+        note = f"\nID платежа: {charge_id}" if charge_id else ""
+        await message.answer(
+            f"✅ Пакет на {credits} сообщений активирован.\n"
+            f"Баланс: {bal}.{note}",
+            reply_markup=main_menu_inline()
+        )
         return
 
     if payload.startswith("pass30_"):
@@ -465,14 +515,12 @@ async def successful_payment(message: Message):
         bal = await get_user_balance(message.from_user.id)
         note = f"\nID платежа: {charge_id}" if charge_id else ""
         await message.answer(
-            f"✅ Подписка на 30 дней (безлимит) активирована!\nДоступ до: {_format_date_human(expires)}\n"
-            f"Теперь расклады списываются по подписке. "
-            f"Текущий баланс кредитов: {bal}{note}",
+            f"✅ Подписка на 30 дней активирована.\nДоступ до: {_format_date_human(expires)}\n"
+            f"Теперь можно получать обычный и расширенный совет.",
             reply_markup=main_menu_inline()
         )
         return
 
-    # fallback
     await message.answer("✅ Оплата получена.", reply_markup=main_menu_inline())
 
 
