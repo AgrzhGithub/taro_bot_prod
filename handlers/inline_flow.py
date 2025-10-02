@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from keyboards_inline import (
     main_menu_inline, theme_inline, spread_inline, buy_inline, back_to_menu_inline, promo_inline, advice_inline_limits,
-    advice_buy_inline  
+    advice_buy_inline
 )
 from config import ADMIN_USERNAME
 from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenario, gpt_make_advice_from_yandex_answer
@@ -211,46 +211,50 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     await state.update_data(
         last_theme=theme,
         last_spread=spread,
-        last_question=user_question,   # <-- ФИКС: сохраняем определённый вопрос
+        last_question=user_question,   # <-- сохраняем определённый вопрос
         last_cards=names,              # список имён карт (нужен для совета)
         last_itog=itog,
         last_scenario=scenario_ctx,
-        last_prediction_text=prediction,
+        last_prediction_text=prediction,  # <-- ВАЖНО: сохраняем полный текст предсказания
     )
 
     # показываем две кнопки "Обычный совет (1)" и "Расширенный совет (3)"
     await cb.message.edit_text(prediction, reply_markup=advice_inline_limits(True, True))
 
     # ВАЖНО: НЕ ОЧИЩАЕМ state здесь, иначе советы не сработают
-    # await state.clear()  # <-- удалить/закомментировать
+    # await state.clear()  # <-- не очищаем
 
 
-
-@router.callback_query(F.data.in_({"advice:1", "advice:3"}))
+@router.callback_query(F.data.in_({
+    "advice:1", "advice:3",          # из ветки «тем»
+    "ownq:advice:1", "ownq:advice:3" # из ветки «Свой вопрос»
+}))
 async def advice_handler(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
-    is_one = (cb.data == "advice:1")
+    # единый парсер
+    data_str = cb.data
+    # допускаем оба формата: "advice:1" и "ownq:advice:1"
+    is_one = data_str.endswith(":1")
     advice_count = 1 if is_one else 3
 
-    # Проверяем подписку
+    # проверка подписки — как и раньше
     has_pass = await pass_is_active(cb.from_user.id)
 
-    # Если требуется подписка (3 карты), а её нет — предлагаем купить PASS
+    # 3 карты — только по подписке
     if advice_count == 3 and not has_pass:
         await cb.message.edit_text(
             "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
             "Оформите 30-дневный доступ и сможете пользоваться как обычным, так и расширенным советом.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[  # используем уже готовый buy:pass30
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Оформить подписку — 599₽", callback_data="buy:pass30:59900")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
         )
         return
 
-    # Если обычный совет без подписки — сначала платёж
+    # 1 карта — если нет подписки, показываем оплату
     if advice_count == 1 and not has_pass:
-        # показываем кнопку оплаты именно после нажатия на «Обычный совет (1 карта)»
         await cb.message.edit_text(
             "🧭 Обычный совет — разовый платёж.\n"
             "Нажмите кнопку ниже, чтобы оплатить и получить совет.",
@@ -258,12 +262,11 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         )
         return
 
-    # Иначе — подписка активна (или 1 карта уже оплачена не нужна) -> генерим совет сразу
+    # подписка активна — генерим совет сразу (1 или 3 карты)
     data = await state.get_data()
     yandex_answer = (cb.message.text or data.get("last_prediction_text") or "").strip()
 
     try:
-        # если решили тянуть доп. карты именно для совета:
         advice_cards = draw_cards(advice_count)
         advice_card_names = [c["name"] for c in advice_cards]
     except Exception:
@@ -278,9 +281,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-    # Логика кнопок после показа совета:
-    # - если только что сделали 1 карту: оставляем доступной 3 карты
-    # - если сделали 3 карты: обе скрываем
+    # после 1 карты оставляем 3; после 3 — скрываем обе
     if is_one:
         new_kb = advice_inline_limits(allow_one=False, allow_three=True)
     else:
@@ -288,7 +289,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
 
     await cb.message.edit_text(advice_text, reply_markup=new_kb)
 
-    
+
 # ---------- свой вопрос ----------
 @router.callback_query(F.data == "menu:custom")
 async def custom_start(cb: CallbackQuery, state: FSMContext):
@@ -339,9 +340,21 @@ async def custom_receive(message: Message, state: FSMContext):
         s.add(models.SpreadLog(user_id=user.id, question=question, spread="custom", cards={"cards": names}, cost=1))
         await s.commit()
 
-    await message.answer(prediction, reply_markup=main_menu_inline())
-    await state.update_data(user_question=message.text.strip())
-    #await state.clear()
+    # ⬇️ ВАЖНО: сохраняем контекст для последующих советов и оплат
+    await state.update_data(
+        user_question=question,
+        last_question=question,
+        last_cards=names,
+        last_spread="custom",
+        last_theme="Пользовательский вопрос",
+        last_itog=_extract_itog(prediction),
+        last_prediction_text=prediction,  # <-- ключевая строка
+    )
+
+    # Показываем те же кнопки советов, что и в ветке «тем»
+    await message.answer(prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=True))
+    # state НЕ очищаем, советы/оплата используют сохранённые данные
+    # await state.clear()
 
 
 # ---------- промокод ----------
@@ -384,10 +397,10 @@ async def show_profile(cb: CallbackQuery):
     await cb.message.edit_text(txt, reply_markup=promo_inline())
 
 
-# ---------- покупка (кредиты + PASS) ----------
+# ---------- покупка (кредиты + PASS + разовый совет) ----------
 PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
 CURRENCY = os.getenv("CURRENCY", "RUB")
-ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "9900")) 
+ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "9900"))  # 99₽ по умолчанию
 
 @router.callback_query(F.data == "menu:buy")
 async def buy_menu(cb: CallbackQuery):
@@ -403,7 +416,7 @@ async def buy_pick(cb: CallbackQuery, bot: Bot):
         return
 
     parts = cb.data.split(":")
-    kind = parts[1]  # "credits" | "pass30"
+    kind = parts[1]  # "credits" | "pass30" | "advice1"
     print(parts)
 
     if kind == "credits":
@@ -417,7 +430,7 @@ async def buy_pick(cb: CallbackQuery, bot: Bot):
         title = f"Подписка (30 дней) — {amount // 100}₽"
         payload = f"pass30_{amount}"
         description = "Безлимитный месячный доступ"
-    elif kind == "advice1":  # <<< НОВОЕ
+    elif kind == "advice1":  # <<< разовый платёж за обычный совет
         amount = int(parts[2])
         title = f"Обычный совет (1 карта) — {amount // 100}₽"
         payload = f"advice1_{amount}"
@@ -464,7 +477,7 @@ async def successful_payment(message: Message, state: FSMContext):
         meta={"raw": sp.model_dump()},
     )
 
-    # --- НОВОЕ: разовый платёж за обычный совет ---
+    # --- разовый платёж за обычный совет ---
     if payload.startswith("advice1_"):
         await mark_purchase_credited(purchase_id)
 
@@ -486,15 +499,15 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception as e:
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        # после разового совета предлагай апселл — расширенный по подписке
+        # после разового совета предлагаем расширенный по подписке
         await message.answer(
             advice_text,
             reply_markup=advice_inline_limits(allow_one=False, allow_three=True)
         )
         return
-    # --- /НОВОЕ ---
+    # --- /разовый совет ---
 
-    # Твои существующие ветки:
+    # пакеты сообщений
     if payload.startswith("credits_"):
         parts = payload.split("_")
         credits = int(parts[1])
@@ -509,6 +522,7 @@ async def successful_payment(message: Message, state: FSMContext):
         )
         return
 
+    # подписка PASS
     if payload.startswith("pass30_"):
         expires = await activate_pass_month(user.id, message.from_user.id, plan="pass_unlim")
         await mark_purchase_credited(purchase_id)
@@ -553,6 +567,7 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
     )
     await cb.message.edit_text(text, reply_markup=kb)
 
+
 def _extract_itog(text: str) -> str:
     """
     Возвращает текст раздела 'Итог' из сгенерированного ответа.
@@ -560,7 +575,7 @@ def _extract_itog(text: str) -> str:
     """
     if not text:
         return ""
-    # Ищем строку, начинающуюся на "Итог:"
+    # Ищем строку, начинающуюся на "Итог"
     lines = text.splitlines()
     itog_idx = next((i for i, line in enumerate(lines) if line.strip().lower().startswith("итог")), None)
     if itog_idx is None:
@@ -572,7 +587,6 @@ def _extract_itog(text: str) -> str:
     # Берем всё после строки с "Итог"
     tail = [s for s in lines[itog_idx+1:] if s.strip()]
     return " ".join(tail).strip()
-
 
 
 # ---------- глушилка на случай «эхо» старых Reply-кнопок ----------
