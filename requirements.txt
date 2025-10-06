@@ -6,3 +6,4 @@ transformers==4.43.3
 torch>=2.2.0
 apscheduler==3.11.0
 pytz==2025.2
+pytest-asyncio
