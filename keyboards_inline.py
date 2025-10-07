@@ -17,7 +17,7 @@ def theme_inline() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Любовь", callback_data="theme:Любовь"),
          InlineKeyboardButton(text="Работа", callback_data="theme:Работа")],
         [InlineKeyboardButton(text="Судьба", callback_data="theme:Судьба"),
-         InlineKeyboardButton(text="Саморазвитие", callback_data="theme:Саморазвитие")],
+         InlineKeyboardButton(text="Самопознание", callback_data="theme:Саморазвитие")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
 
@@ -32,10 +32,10 @@ def spread_inline() -> InlineKeyboardMarkup:
 
 def buy_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="5 сообщений — 149₽", callback_data="buy:credits:5:14900")],
-        [InlineKeyboardButton(text="10 сообщений — 399₽", callback_data="buy:credits:10:39900")],
-        [InlineKeyboardButton(text="30 сообщений — 599₽", callback_data="buy:credits:30:59900")],
-        [InlineKeyboardButton(text="Подписка (30 дней) — 599₽", callback_data="buy:pass30:59900")],
+        [InlineKeyboardButton(text="5 сообщений — 80₽", callback_data="buy:credits:5:8000")],
+        [InlineKeyboardButton(text="10 сообщений — 119₽", callback_data="buy:credits:10:11900")],
+        [InlineKeyboardButton(text="30 сообщений — 199₽", callback_data="buy:credits:30:19900")],
+        [InlineKeyboardButton(text="Подписка (30 дней) — 299₽", callback_data="buy:pass30:29900")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
 

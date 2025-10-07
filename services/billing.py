@@ -19,6 +19,25 @@ from config import (
     PROMO_DEFAULT_CREDITS,
 )
 
+
+def pluralize_messages(n: int) -> str:
+    """
+    Возвращает строку с числом и правильным склонением слова «сообщение».
+    Пример: 1 сообщение, 2 сообщения, 5 сообщений.
+    """
+    n = abs(int(n))
+    if 11 <= (n % 100) <= 19:
+        form = "сообщений"
+    else:
+        last = n % 10
+        if last == 1:
+            form = "сообщение"
+        elif 2 <= last <= 4:
+            form = "сообщения"
+        else:
+            form = "сообщений"
+    return f"{n} {form}"
+
 # =========================
 # Общие утилиты / константы
 # =========================
@@ -43,7 +62,7 @@ async def get_session() -> AsyncSession:
 async def ensure_user(tg_id: int, username: Optional[str]) -> User:
     """
     Получить/создать пользователя. При первом запуске — создать уникальный invite_code
-    и выдать стартовые кредиты DEFAULT_FREE_CREDITS (единый баланс).
+    и выдать стартовые кредиты DEFAULT_FREE_CREDITS (единый баланс) + ЗАЛОГИРОВАТЬ ЭТО.
     """
     async with SessionLocal() as session:
         res = await session.execute(select(User).where(User.tg_id == tg_id))
@@ -66,14 +85,25 @@ async def ensure_user(tg_id: int, username: Optional[str]) -> User:
         user = User(
             tg_id=tg_id,
             username=username,
-            invite_code=code,               # уже в верхнем регистре
-            credits=DEFAULT_FREE_CREDITS,   # единый баланс
+            invite_code=code,                   # уже в верхнем регистре
+            credits=DEFAULT_FREE_CREDITS,       # единый баланс (включая 2 бесплатных)
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        return user
 
+        # 👇 ДОБАВЛЕНО: лог начисления стартовых (2) в transactions
+        if (DEFAULT_FREE_CREDITS or 0) > 0:
+            session.add(Transaction(
+                user_id=user.id,
+                type="grant",
+                amount=int(DEFAULT_FREE_CREDITS),
+                status="success",
+                meta={"reason": "welcome_bonus"}
+            ))
+            await session.commit()
+
+        return user
 
 async def get_user_balance(tg_id: int) -> int:
     async with SessionLocal() as session:

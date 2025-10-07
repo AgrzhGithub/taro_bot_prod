@@ -20,3 +20,5 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
 
 ADVICE_BASIC_PRICE = int(os.getenv("ADVICE_BASIC_PRICE", "4900"))  # мин. единицы (копейки)
 ADVICE_CURRENCY    = os.getenv("ADVICE_CURRENCY", "RUB")
+
+DEFAULT_FREE_CREDITS = 2

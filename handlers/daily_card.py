@@ -55,7 +55,7 @@ def _daily_time_kb():
     kb = []
     for row in rows:
         kb.append([
-            InlineKeyboardButton(text=f"{h:02d}:01", callback_data=f"daily:time:{h}") for h in row
+            InlineKeyboardButton(text=f"{h:02d}:00", callback_data=f"daily:time:{h}") for h in row
         ])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu:daily")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -226,6 +226,7 @@ _ALLOWED_CARD_NAMES = [
 
     # --- Кубки ---
     "2 Кубки", "3 Кубки", "10 Кубки",
+
 
     # --- Мечи ---
     "5 Мечи", "3 Мечи", "Паж Мечи",
