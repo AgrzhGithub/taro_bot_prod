@@ -4,7 +4,7 @@ import secrets
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta, date
 
-from sqlalchemy import select, and_, desc
+from sqlalchemy import select, and_, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import SessionLocal
@@ -20,24 +20,83 @@ from config import (
 )
 
 
-def pluralize_messages(n: int) -> str:
-    """
-    Возвращает строку с числом и правильным склонением слова «сообщение».
-    Пример: 1 сообщение, 2 сообщения, 5 сообщений.
-    """
+def pluralize_advices(n: int) -> str:
     n = abs(int(n))
     if 11 <= (n % 100) <= 19:
-        form = "сообщений"
+        form = "советов"
     else:
         last = n % 10
         if last == 1:
-            form = "сообщение"
+            form = "совет"
         elif 2 <= last <= 4:
-            form = "сообщения"
+            form = "совета"
         else:
-            form = "сообщений"
+            form = "советов"
     return f"{n} {form}"
 
+async def get_advice_balance_by_user_id(user_id: int) -> int:
+    """Остаток советов как (advice_grant - advice_spend)."""
+    async with SessionLocal() as s:
+        q_grant = select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id == user_id, Transaction.type == "advice_grant", Transaction.status == "success"
+        )
+        q_spend = select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id == user_id, Transaction.type == "advice_spend", Transaction.status == "success"
+        )
+        grant_sum = (await s.execute(q_grant)).scalar_one()
+        spend_sum = (await s.execute(q_spend)).scalar_one()
+        return int(grant_sum) - int(spend_sum)
+
+async def get_advice_balance_by_tg_id(tg_id: int) -> int:
+    async with SessionLocal() as s:
+        res = await s.execute(select(User).where(User.tg_id == tg_id))
+        u = res.scalar_one_or_none()
+        if not u:
+            return 0
+        return await get_advice_balance_by_user_id(u.id)
+
+async def grant_advice_pack(user_id: int, qty: int, reason: str = "advice_pack_purchase"):
+    """Начислить пакет советов (только транзакцией)."""
+    if qty <= 0:
+        return
+    async with SessionLocal() as s:
+        session_user = await s.get(User, user_id)
+        if not session_user:
+            return
+        s.add(Transaction(
+            user_id=user_id,
+            type="advice_grant",
+            amount=int(qty),
+            status="success",
+            meta={"reason": reason}
+        ))
+        await s.commit()
+
+async def spend_one_advice(tg_id: int, reason: str = "advice_use") -> bool:
+    """Списать 1 совет (если хватает остатка)."""
+    async with SessionLocal() as s:
+        res = await s.execute(select(User).where(User.tg_id == tg_id))
+        u = res.scalar_one_or_none()
+        if not u:
+            return False
+
+        # блокировка пользователя на запись
+        await s.refresh(u, with_for_update=True)
+
+        # считаем остаток на момент списания
+        balance = await get_advice_balance_by_user_id(u.id)
+        if balance <= 0:
+            return False
+
+        s.add(Transaction(
+            user_id=u.id,
+            type="advice_spend",
+            amount=1,
+            status="success",
+            meta={"reason": reason}
+        ))
+        await s.commit()
+        return True
 # =========================
 # Общие утилиты / константы
 # =========================

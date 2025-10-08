@@ -35,6 +35,7 @@ def buy_inline() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="5 сообщений — 80₽", callback_data="buy:credits:5:8000")],
         [InlineKeyboardButton(text="10 сообщений — 119₽", callback_data="buy:credits:10:11900")],
         [InlineKeyboardButton(text="30 сообщений — 199₽", callback_data="buy:credits:30:19900")],
+        [InlineKeyboardButton(text="🧠 Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
         [InlineKeyboardButton(text="Подписка (30 дней) — 299₽", callback_data="buy:pass30:29900")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
@@ -75,9 +76,8 @@ def advice_inline_limits(allow_one: bool = True, allow_three: bool = True) -> In
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def advice_buy_inline(amount_kopecs: int) -> InlineKeyboardMarkup:
-    rub = amount_kopecs // 100
+def advice_pack_buy_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Купить совет — {rub}₽", callback_data=f"buy:advice1:{amount_kopecs}")],
+        [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
