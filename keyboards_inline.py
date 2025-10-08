@@ -35,7 +35,7 @@ def buy_inline() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="5 сообщений — 80₽", callback_data="buy:credits:5:8000")],
         [InlineKeyboardButton(text="10 сообщений — 119₽", callback_data="buy:credits:10:11900")],
         [InlineKeyboardButton(text="30 сообщений — 199₽", callback_data="buy:credits:30:19900")],
-        [InlineKeyboardButton(text="🧠 Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
+        [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
         [InlineKeyboardButton(text="Подписка (30 дней) — 299₽", callback_data="buy:pass30:29900")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
     ])
