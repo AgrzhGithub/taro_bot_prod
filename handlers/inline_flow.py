@@ -10,6 +10,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.exceptions import TelegramBadRequest
 import os
 from datetime import datetime, date
 
@@ -30,7 +31,7 @@ from services.billing import (
     get_advice_balance_by_tg_id, # остаток советов по tg_id
     pluralize_advices,
 )
-from handlers.daily_card import _send_daily_media_with_caption
+from handlers.daily_card import _send_daily_media_with_caption, _send_spread_media_with_caption
 from services.payments import create_purchase, mark_purchase_credited
 from db import SessionLocal, models
 
@@ -101,6 +102,29 @@ def _extract_itog(text: str) -> str:
     return " ".join(tail).strip()
 
 
+def _get_message_text(msg: Message) -> str:
+    """Возвращает текст сообщения: text или caption."""
+    return (msg.text or msg.caption or "").strip()
+
+
+async def _edit_text_or_caption(msg: Message, text: str, reply_markup=None) -> bool:
+    """
+    Аккуратно редактирует текст или подпись в зависимости от типа сообщения.
+    Возвращает True, если удалось отредактировать, иначе отправляет новое сообщение и возвращает False.
+    """
+    try:
+        # Если у сообщения есть медиа (photo/video/animation/document) — редактируем подпись
+        if getattr(msg, "photo", None) or getattr(msg, "video", None) or getattr(msg, "animation", None) or getattr(msg, "document", None):
+            await msg.edit_caption(text, reply_markup=reply_markup)
+        else:
+            await msg.edit_text(text, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest:
+        # Если редактирование невозможно (например, слишком старое сообщение) — отправим новое.
+        await msg.answer(text, reply_markup=reply_markup)
+        return False
+
+
 # ---------- Клавиатуры ----------
 def _advice_back_kb(allow_three: bool = True) -> InlineKeyboardMarkup:
     """
@@ -108,7 +132,7 @@ def _advice_back_kb(allow_three: bool = True) -> InlineKeyboardMarkup:
     """
     rows = [[InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")]]
     if allow_three:
-        rows.append([InlineKeyboardButton(text="✨ Расширенный совет (3)", callback_data="advice:3")])
+        rows.append([InlineKeyboardButton(text="🔮 Расширенный совет (3 карты)", callback_data="advice:3")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -168,7 +192,7 @@ async def help_screen(cb: CallbackQuery):
         "• Не является мед/юр консультацией.\n"
     )
     if cb.message.text != txt:
-        await cb.message.edit_text(txt, reply_markup=main_menu_inline())
+        await _edit_text_or_caption(cb.message, txt, reply_markup=main_menu_inline())
     else:
         await cb.message.edit_reply_markup(reply_markup=main_menu_inline())
 
@@ -177,7 +201,7 @@ async def help_screen(cb: CallbackQuery):
 async def nav_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.answer()
-    await cb.message.edit_text("📋 Главное меню:", reply_markup=main_menu_inline())
+    await _edit_text_or_caption(cb.message, "📋 Главное меню:", reply_markup=main_menu_inline())
 
 
 # ---------- темы/расклады ----------
@@ -185,7 +209,7 @@ async def nav_menu(cb: CallbackQuery, state: FSMContext):
 async def menu_theme(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.answer()
-    await cb.message.edit_text("Выберите тему:", reply_markup=theme_inline())
+    await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
 
 
 @router.callback_query(F.data.startswith("theme:"))
@@ -193,13 +217,13 @@ async def pick_theme(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     theme = cb.data.split(":", 1)[1]
     await state.update_data(theme=theme)
-    await cb.message.edit_text(f"Тема: {theme}\nВыберите расклад:", reply_markup=spread_inline())
+    await _edit_text_or_caption(cb.message, f"Тема: {theme}\nВыберите расклад:", reply_markup=spread_inline())
 
 
 @router.callback_query(F.data == "nav:theme")
 async def back_to_theme(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
-    await cb.message.edit_text("Выберите тему:", reply_markup=theme_inline())
+    await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
 
 
 @router.callback_query(F.data.startswith("spread:"))
@@ -220,11 +244,11 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
     ok, src = await spend_one_or_pass(cb.from_user.id)
     if not ok:
         if src == "pass_rate_limit":
-            await cb.message.edit_text("⏳ Слишком часто. Попробуйте через минуту.", reply_markup=main_menu_inline())
+            await _edit_text_or_caption(cb.message, "⏳ Слишком часто. Попробуйте через минуту.", reply_markup=main_menu_inline())
         elif src == "pass_day_limit":
-            await cb.message.edit_text("📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=main_menu_inline())
+            await _edit_text_or_caption(cb.message, "📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=main_menu_inline())
         else:
-            await cb.message.edit_text("❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", reply_markup=main_menu_inline())
+            await _edit_text_or_caption(cb.message, "❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", reply_markup=main_menu_inline())
         await state.clear()
         return
 
@@ -239,7 +263,7 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
 
     names = _card_names(cards)
     cards_list = ", ".join(names)
-    await cb.message.edit_text(f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
+    await _edit_text_or_caption(cb.message, f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
 
     try:
         prediction = await gpt_make_prediction(
@@ -268,9 +292,13 @@ async def pick_spread(cb: CallbackQuery, state: FSMContext):
         last_prediction_text=prediction,
     )
 
-    await cb.message.edit_text(prediction, reply_markup=advice_inline_limits(True, True))
+    kb = advice_inline_limits(True, True)
+    sent = await _send_spread_media_with_caption(cb.message, prediction, reply_markup=kb)
+    if not sent:
+        await _edit_text_or_caption(cb.message, prediction, reply_markup=kb)
 
 
+# ---------- СОВЕТЫ ----------
 @router.callback_query(F.data.in_({"advice:1", "advice:3", "ownq:advice:1", "ownq:advice:3"}))
 async def advice_handler(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -283,13 +311,13 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     # --- Расширенный совет (3) — только по подписке ---
     if advice_count == 3:
         if not has_pass:
-            # Предложение оформить PASS + возможность вернуться к предсказанию
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
                 [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
-            await cb.message.edit_text(
+            await _edit_text_or_caption(
+                cb.message,
                 "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
                 "Оформите 30-дневный доступ — и сможете пользоваться и обычным, и расширенным советом.",
                 reply_markup=kb
@@ -298,7 +326,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
 
         # подписка активна → генерируем на 3
         data = await state.get_data()
-        base_answer = (cb.message.text or data.get("last_prediction_text") or "").strip()
+        base_answer = (_get_message_text(cb.message) or data.get("last_prediction_text") or "").strip()
         try:
             cards = draw_cards(3)
             card_names = [c["name"] for c in cards]
@@ -313,8 +341,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         except Exception as e:
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        # после 3-картного совета только «Назад»
-        await cb.message.edit_text(advice_text, reply_markup=_advice_back_kb(allow_three=False))
+        await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=False))
         return
 
     # --- Обычный совет (1) ---
@@ -328,14 +355,11 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
-            await cb.message.edit_text(
-                "У вас нет доступных советов.\nВыберите вариант получения:",
-                reply_markup=kb
-            )
+            await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
             return
 
     data = await state.get_data()
-    base_answer = (cb.message.text or data.get("last_prediction_text") or "").strip()
+    base_answer = (_get_message_text(cb.message) or data.get("last_prediction_text") or "").strip()
 
     try:
         cards = draw_cards(1)
@@ -352,8 +376,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-    # после совета (1) показываем «Назад» и (по желанию) кнопку на 3
-    await cb.message.edit_text(advice_text, reply_markup=_advice_back_kb(allow_three=True))
+    await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=True))
 
 
 @router.callback_query(F.data == "advice:back")
@@ -363,9 +386,9 @@ async def advice_back_to_prediction(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prediction = (data.get("last_prediction_text") or "").strip()
     if not prediction:
-        await cb.message.edit_text("Предсказание недоступно. Попробуйте сделать расклад заново.", reply_markup=main_menu_inline())
+        await _edit_text_or_caption(cb.message, "Предсказание недоступно. Попробуйте сделать расклад заново.", reply_markup=main_menu_inline())
         return
-    await cb.message.edit_text(prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=True))
+    await _edit_text_or_caption(cb.message, prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=True))
 
 
 # ---------- свой вопрос ----------
@@ -380,7 +403,7 @@ async def custom_start(cb: CallbackQuery, state: FSMContext):
         "• Как наладить отношения с близким человеком?\n"
         "• На что обратиться внимание в самочувствии?\n"
     )
-    await cb.message.edit_text(hint, reply_markup=back_to_menu_inline())
+    await _edit_text_or_caption(cb.message, hint, reply_markup=back_to_menu_inline())
 
 
 @router.message(CustomFSM.waiting_question, F.text)
@@ -428,7 +451,10 @@ async def custom_receive(message: Message, state: FSMContext):
         last_prediction_text=prediction,
     )
 
-    await message.answer(prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=True))
+    kb = advice_inline_limits(allow_one=True, allow_three=True)
+    sent = await _send_spread_media_with_caption(message, prediction, reply_markup=kb)
+    if not sent:
+        await message.answer(prediction, reply_markup=kb)
 
 
 # ---------- промокод ----------
@@ -436,7 +462,7 @@ async def custom_receive(message: Message, state: FSMContext):
 async def promo_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.set_state(PromoFSM.waiting_code)
-    await cb.message.edit_text("Введите промокод сообщением ⬇️", reply_markup=back_to_menu_inline())
+    await _edit_text_or_caption(cb.message, "Введите промокод сообщением ⬇️", reply_markup=back_to_menu_inline())
 
 
 @router.message(PromoFSM.waiting_code, F.text)
@@ -453,11 +479,9 @@ async def show_profile(cb: CallbackQuery):
     await cb.answer()
     user = await ensure_user(cb.from_user.id, cb.from_user.username)
 
-    # Баланс сообщений (кредиты) и остаток советов (пакеты)
     balance_msgs = await get_user_balance(cb.from_user.id)
     advice_left = await get_advice_balance_by_tg_id(cb.from_user.id)
 
-    # НИЧЕГО не списываем здесь.
     is_active = await pass_is_active(cb.from_user.id)
     pass_line = "🎫 Подписка не активна"
     if is_active:
@@ -476,25 +500,25 @@ async def show_profile(cb: CallbackQuery):
         f"▶️ Ссылка для приглашений:\n{link}"
     )
 
-    await cb.message.edit_text(txt, reply_markup=promo_inline())
+    await _edit_text_or_caption(cb.message, txt, reply_markup=promo_inline())
 
 
 # ---------- покупка (кредиты + PASS + советы) ----------
 PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
 CURRENCY = os.getenv("CURRENCY", "RUB")
-ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "8000"))  # 99₽ по умолчанию
+ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "8000"))  # 80₽ по умолчанию
 
 @router.callback_query(F.data == "menu:buy")
 async def buy_menu(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_text("Выберите пакет:", reply_markup=buy_inline())
+    await _edit_text_or_caption(cb.message, "Выберите пакет:", reply_markup=buy_inline())
 
 
 @router.callback_query(F.data.startswith("buy:"))
 async def buy_pick(cb: CallbackQuery, bot: Bot):
     await cb.answer()
     if not PROVIDER_TOKEN:
-        await cb.message.edit_text("⚠️ Платёжный провайдер не настроен. Добавьте PAYMENTS_PROVIDER_TOKEN в .env", reply_markup=main_menu_inline())
+        await _edit_text_or_caption(cb.message, "⚠️ Платёжный провайдер не настроен. Добавьте PAYMENTS_PROVIDER_TOKEN в .env", reply_markup=main_menu_inline())
         return
 
     parts = cb.data.split(":")
@@ -675,7 +699,7 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
         "Нажмите кнопку ниже — откроется мой личный чат. "
         "Напишите ваше сообщение (и нажмите Start, если чат открывается впервые)."
     )
-    await cb.message.edit_text(text, reply_markup=kb)
+    await _edit_text_or_caption(cb.message, text, reply_markup=kb)
 
 
 # ---------- глушилка на случай «эхо» старых Reply-кнопок ----------

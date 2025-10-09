@@ -154,7 +154,7 @@ CATALOG: Dict[str, ThemeScenarios] = {
     # 4) САМООРАЗВИТИЕ
     "Саморазвитие": ThemeScenarios(
         theme_id="Саморазвитие",
-        title="Саморазвитие",
+        title="Самопознание",
         aliases=["self", "samorazvitie", "theme_self"],
         scenarios=[
             Scenario(

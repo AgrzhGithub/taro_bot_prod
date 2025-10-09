@@ -198,6 +198,47 @@ async def _send_daily_media_with_caption(bot_or_msg, chat_id: int | None, captio
             return False
     except Exception:
         return False
+    
+    # === Рандомное видео для ОБЫЧНЫХ РАСКЛАДОВ (не карта дня) ===
+async def _send_spread_media_with_caption(bot_or_msg, caption: str, reply_markup=None) -> bool:
+    """
+    Отправляет случайное mp4/gif/webm из папки data/spreads/ с подписью.
+    Возвращает True, если анимация отправлена; False — если файлов нет/ошибка.
+    """
+    try:
+        import os, random
+        from aiogram.types import FSInputFile
+
+        folder = "data/spreads"
+        if not os.path.isdir(folder):
+            return False
+
+        files = [f for f in os.listdir(folder) if f.lower().endswith((".mp4", ".gif", ".webm"))]
+        if not files:
+            return False
+
+        path = os.path.join(folder, random.choice(files))
+        f = FSInputFile(path)
+
+        # подпись ограничим до ~1024 символов (лимит на caption)
+        CAP = 1024
+        cap = caption if len(caption) <= CAP else (caption[: CAP - 20].rstrip() + "…")
+
+        # Если это message/callback.message — есть answer_*
+        if hasattr(bot_or_msg, "answer_animation"):
+            await bot_or_msg.answer_animation(f, caption=cap, reply_markup=reply_markup, request_timeout=180)
+            return True
+        if hasattr(bot_or_msg, "answer_video"):
+            await bot_or_msg.answer_video(f, caption=cap, supports_streaming=True, reply_markup=reply_markup, request_timeout=180)
+            return True
+
+        # Иначе считаем, что это bot-объект — нужен chat_id (тут не используем этот путь из inline_flow)
+        return False
+
+    except Exception as e:
+        print(f"[WARN] _send_spread_media_with_caption failed: {e}")
+        return False
+
 
 # =========================
 # Поднабор доступных карт для «Карты дня»
