@@ -28,7 +28,7 @@ except Exception:
     main_menu = None
 
 # === Новые роутеры ===
-from handlers import inline_flow, daily_card, admin, clarify_scenarios
+from handlers import inline_flow, daily_card, admin, clarify_scenarios, clarify_flow
 from services.daily import list_due_subscribers
 from handlers.daily_card import send_card_of_day
 from db.utils import create_all  # функция для создания таблиц
@@ -97,6 +97,7 @@ async def main():
     dp.include_router(inline_flow.router)
     dp.include_router(daily_card.router)
     dp.include_router(admin.router)
+    dp.include_router(clarify_flow.router)
 
 
     # Планировщик

@@ -11,6 +11,7 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
+from typing import List
 import os
 from datetime import datetime, date
 
@@ -127,13 +128,14 @@ async def _edit_text_or_caption(msg: Message, text: str, reply_markup=None) -> b
 
 # ---------- Клавиатуры ----------
 def _advice_back_kb(allow_three: bool = True) -> InlineKeyboardMarkup:
-    """
-    Клавиатура под советом: вернуться к предсказанию (+ опционально расширенный совет).
-    """
-    rows = [[InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")]]
+    rows: List[List[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton(text="🧭 Обычный совет (1 карта)", callback_data="advice:1")])
     if allow_three:
         rows.append([InlineKeyboardButton(text="🔮 Расширенный совет (3 карты)", callback_data="advice:3")])
+    rows.append([InlineKeyboardButton(text="🔁 Ещё по списку", callback_data="menu:theme")])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 # ---------- старт/меню/хелп ----------
@@ -204,98 +206,98 @@ async def nav_menu(cb: CallbackQuery, state: FSMContext):
     await _edit_text_or_caption(cb.message, "📋 Главное меню:", reply_markup=main_menu_inline())
 
 
-# ---------- темы/расклады ----------
-@router.callback_query(F.data == "menu:theme")
-async def menu_theme(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.answer()
-    await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
+# # ---------- темы/расклады ----------
+# @router.callback_query(F.data == "menu:theme")
+# async def menu_theme(cb: CallbackQuery, state: FSMContext):
+#     await state.clear()
+#     await cb.answer()
+#     await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
 
 
-@router.callback_query(F.data.startswith("theme:"))
-async def pick_theme(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    theme = cb.data.split(":", 1)[1]
-    await state.update_data(theme=theme)
-    await _edit_text_or_caption(cb.message, f"Тема: {theme}\nВыберите расклад:", reply_markup=spread_inline())
+# @router.callback_query(F.data.startswith("theme:"))
+# async def pick_theme(cb: CallbackQuery, state: FSMContext):
+#     await cb.answer()
+#     theme = cb.data.split(":", 1)[1]
+#     await state.update_data(theme=theme)
+#     await _edit_text_or_caption(cb.message, f"Тема: {theme}\nВыберите расклад:", reply_markup=spread_inline())
 
 
-@router.callback_query(F.data == "nav:theme")
-async def back_to_theme(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
+# @router.callback_query(F.data == "nav:theme")
+# async def back_to_theme(cb: CallbackQuery, state: FSMContext):
+#     await cb.answer()
+#     await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
 
 
-@router.callback_query(F.data.startswith("spread:"))
-async def pick_spread(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    spread = cb.data.split(":", 1)[1]
-    data = await state.get_data()
+# @router.callback_query(F.data.startswith("spread:"))
+# async def pick_spread(cb: CallbackQuery, state: FSMContext):
+#     await cb.answer()
+#     spread = cb.data.split(":", 1)[1]
+#     data = await state.get_data()
 
-    theme = data.get("theme", "Общая")
-    scenario_ctx = data.get("scenario_ctx")
-    user_question = (
-        data.get("user_question")
-        or data.get("question")
-        or data.get("last_question")
-        or ""
-    )
+#     theme = data.get("theme", "Общая")
+#     scenario_ctx = data.get("scenario_ctx")
+#     user_question = (
+#         data.get("user_question")
+#         or data.get("question")
+#         or data.get("last_question")
+#         or ""
+#     )
 
-    ok, src = await spend_one_or_pass(cb.from_user.id)
-    if not ok:
-        if src == "pass_rate_limit":
-            await _edit_text_or_caption(cb.message, "⏳ Слишком часто. Попробуйте через минуту.", reply_markup=main_menu_inline())
-        elif src == "pass_day_limit":
-            await _edit_text_or_caption(cb.message, "📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=main_menu_inline())
-        else:
-            await _edit_text_or_caption(cb.message, "❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", reply_markup=main_menu_inline())
-        await state.clear()
-        return
+#     ok, src = await spend_one_or_pass(cb.from_user.id)
+#     if not ok:
+#         if src == "pass_rate_limit":
+#             await _edit_text_or_caption(cb.message, "⏳ Слишком часто. Попробуйте через минуту.", reply_markup=main_menu_inline())
+#         elif src == "pass_day_limit":
+#             await _edit_text_or_caption(cb.message, "📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=main_menu_inline())
+#         else:
+#             await _edit_text_or_caption(cb.message, "❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", reply_markup=main_menu_inline())
+#         await state.clear()
+#         return
 
-    if spread == "Три карты":
-        cards = draw_cards(3)
-    elif spread == "Подкова":
-        cards = draw_cards(7)
-    elif spread == "Алхимик":
-        cards = draw_cards(4)
-    else:
-        cards = draw_cards(3)
+#     if spread == "Три карты":
+#         cards = draw_cards(3)
+#     elif spread == "Подкова":
+#         cards = draw_cards(7)
+#     elif spread == "Алхимик":
+#         cards = draw_cards(4)
+#     else:
+#         cards = draw_cards(3)
 
-    names = _card_names(cards)
-    cards_list = ", ".join(names)
-    await _edit_text_or_caption(cb.message, f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
+#     names = _card_names(cards)
+#     cards_list = ", ".join(names)
+#     await _edit_text_or_caption(cb.message, f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
 
-    try:
-        prediction = await gpt_make_prediction(
-            question=user_question,
-            theme=theme,
-            spread=spread,
-            cards_list=cards_list,
-            scenario_ctx=scenario_ctx,
-        )
-    except Exception as e:
-        prediction = f"⚠️ Не удалось получить толкование: {e}"
+#     try:
+#         prediction = await gpt_make_prediction(
+#             question=user_question,
+#             theme=theme,
+#             spread=spread,
+#             cards_list=cards_list,
+#             scenario_ctx=scenario_ctx,
+#         )
+#     except Exception as e:
+#         prediction = f"⚠️ Не удалось получить толкование: {e}"
 
-    user = await ensure_user(cb.from_user.id, cb.from_user.username)
-    async with SessionLocal() as s:
-        s.add(models.SpreadLog(user_id=user.id, theme=theme, spread=spread, cards={"cards": names}, cost=1))
-        await s.commit()
+#     user = await ensure_user(cb.from_user.id, cb.from_user.username)
+#     async with SessionLocal() as s:
+#         s.add(models.SpreadLog(user_id=user.id, theme=theme, spread=spread, cards={"cards": names}, cost=1))
+#         await s.commit()
 
-    itog = _extract_itog(prediction)
-    await state.update_data(
-        last_theme=theme,
-        last_spread=spread,
-        last_question=user_question,
-        last_cards=names,
-        last_itog=itog,
-        last_scenario=scenario_ctx,
-        last_prediction_text=prediction,
-    )
+#     itog = _extract_itog(prediction)
+#     await state.update_data(
+#         last_theme=theme,
+#         last_spread=spread,
+#         last_question=user_question,
+#         last_cards=names,
+#         last_itog=itog,
+#         last_scenario=scenario_ctx,
+#         last_prediction_text=prediction,
+#     )
 
-    kb = advice_inline_limits(True, True)
-    sent = await _send_spread_media_with_caption(cb.message, prediction, reply_markup=kb)
-    if not sent:
-        await _edit_text_or_caption(cb.message, prediction, reply_markup=kb)
+#     kb = advice_inline_limits(True, True)
+#     sent = await _send_spread_media_with_caption(cb.message, prediction, reply_markup=kb)
+#     if not sent:
+#         await _edit_text_or_caption(cb.message, prediction, reply_markup=kb)
 
 
 # ---------- СОВЕТЫ ----------
@@ -313,7 +315,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         if not has_pass:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
-                [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
+                #[InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
             await _edit_text_or_caption(
@@ -352,8 +354,8 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         else:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
-                [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+                # [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
+                # [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
             await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
             return
