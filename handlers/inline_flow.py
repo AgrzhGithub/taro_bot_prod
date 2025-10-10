@@ -26,10 +26,10 @@ from services.tarot_ai import draw_cards, gpt_make_prediction, merge_with_scenar
 from services.billing import (
     ensure_user, get_user_balance, redeem_promocode,
     build_invite_link, grant_credits, activate_pass_month,
-    spend_one_or_pass,           # использовать для списаний только при раскладах/вопросах
+    spend_one_or_pass,
     pass_is_active,
-    spend_one_advice,            # списываем 1 совет из пакета
-    get_advice_balance_by_tg_id, # остаток советов по tg_id
+    spend_one_advice,
+    get_advice_balance_by_tg_id,
     pluralize_advices,
 )
 from handlers.daily_card import _send_daily_media_with_caption, _send_spread_media_with_caption
@@ -62,7 +62,6 @@ def _card_names(cards) -> list[str]:
 
 
 def _format_date_human(val) -> str:
-    """Безопасное форматирование даты в DD.MM.YYYY для datetime/date/ISO-строки."""
     if isinstance(val, (datetime, date)):
         return val.strftime("%d.%m.%Y")
     if isinstance(val, str):
@@ -74,7 +73,6 @@ def _format_date_human(val) -> str:
 
 
 async def _get_pass_expiry_by_tg(tg_id: int):
-    """Возвращает expires_at для PASS по tg_id (или None). Ничего не списывает."""
     async with SessionLocal() as s:
         q = (
             select(models.SubscriptionPass.expires_at)
@@ -87,10 +85,6 @@ async def _get_pass_expiry_by_tg(tg_id: int):
 
 
 def _extract_itog(text: str) -> str:
-    """
-    Возвращает текст раздела 'Итог' из сгенерированного ответа.
-    Если 'Итог' не найден, возвращает пустую строку.
-    """
     if not text:
         return ""
     lines = text.splitlines()
@@ -104,29 +98,22 @@ def _extract_itog(text: str) -> str:
 
 
 def _get_message_text(msg: Message) -> str:
-    """Возвращает текст сообщения: text или caption."""
     return (msg.text or msg.caption or "").strip()
 
 
 async def _edit_text_or_caption(msg: Message, text: str, reply_markup=None) -> bool:
-    """
-    Аккуратно редактирует текст или подпись в зависимости от типа сообщения.
-    Возвращает True, если удалось отредактировать, иначе отправляет новое сообщение и возвращает False.
-    """
     try:
-        # Если у сообщения есть медиа (photo/video/animation/document) — редактируем подпись
         if getattr(msg, "photo", None) or getattr(msg, "video", None) or getattr(msg, "animation", None) or getattr(msg, "document", None):
             await msg.edit_caption(text, reply_markup=reply_markup)
         else:
             await msg.edit_text(text, reply_markup=reply_markup)
         return True
     except TelegramBadRequest:
-        # Если редактирование невозможно (например, слишком старое сообщение) — отправим новое.
         await msg.answer(text, reply_markup=reply_markup)
         return False
 
 
-# ---------- Клавиатуры ----------
+# ---------- Локальные клавиатуры для советов ----------
 def _advice_back_kb(allow_three: bool = True) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton(text="🧭 Обычный совет (1 карта)", callback_data="advice:1")])
@@ -135,7 +122,6 @@ def _advice_back_kb(allow_three: bool = True) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="🔁 Ещё по списку", callback_data="menu:theme")])
     rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 
 # ---------- старт/меню/хелп ----------
@@ -206,100 +192,6 @@ async def nav_menu(cb: CallbackQuery, state: FSMContext):
     await _edit_text_or_caption(cb.message, "📋 Главное меню:", reply_markup=main_menu_inline())
 
 
-# # ---------- темы/расклады ----------
-# @router.callback_query(F.data == "menu:theme")
-# async def menu_theme(cb: CallbackQuery, state: FSMContext):
-#     await state.clear()
-#     await cb.answer()
-#     await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
-
-
-# @router.callback_query(F.data.startswith("theme:"))
-# async def pick_theme(cb: CallbackQuery, state: FSMContext):
-#     await cb.answer()
-#     theme = cb.data.split(":", 1)[1]
-#     await state.update_data(theme=theme)
-#     await _edit_text_or_caption(cb.message, f"Тема: {theme}\nВыберите расклад:", reply_markup=spread_inline())
-
-
-# @router.callback_query(F.data == "nav:theme")
-# async def back_to_theme(cb: CallbackQuery, state: FSMContext):
-#     await cb.answer()
-#     await _edit_text_or_caption(cb.message, "Выберите тему:", reply_markup=theme_inline())
-
-
-# @router.callback_query(F.data.startswith("spread:"))
-# async def pick_spread(cb: CallbackQuery, state: FSMContext):
-#     await cb.answer()
-#     spread = cb.data.split(":", 1)[1]
-#     data = await state.get_data()
-
-#     theme = data.get("theme", "Общая")
-#     scenario_ctx = data.get("scenario_ctx")
-#     user_question = (
-#         data.get("user_question")
-#         or data.get("question")
-#         or data.get("last_question")
-#         or ""
-#     )
-
-#     ok, src = await spend_one_or_pass(cb.from_user.id)
-#     if not ok:
-#         if src == "pass_rate_limit":
-#             await _edit_text_or_caption(cb.message, "⏳ Слишком часто. Попробуйте через минуту.", reply_markup=main_menu_inline())
-#         elif src == "pass_day_limit":
-#             await _edit_text_or_caption(cb.message, "📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=main_menu_inline())
-#         else:
-#             await _edit_text_or_caption(cb.message, "❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", reply_markup=main_menu_inline())
-#         await state.clear()
-#         return
-
-#     if spread == "Три карты":
-#         cards = draw_cards(3)
-#     elif spread == "Подкова":
-#         cards = draw_cards(7)
-#     elif spread == "Алхимик":
-#         cards = draw_cards(4)
-#     else:
-#         cards = draw_cards(3)
-
-#     names = _card_names(cards)
-#     cards_list = ", ".join(names)
-#     await _edit_text_or_caption(cb.message, f"🎴 Расклад: {spread}\n🃏 Карты: {cards_list}\n\n🔮 Делаю толкование...")
-
-#     try:
-#         prediction = await gpt_make_prediction(
-#             question=user_question,
-#             theme=theme,
-#             spread=spread,
-#             cards_list=cards_list,
-#             scenario_ctx=scenario_ctx,
-#         )
-#     except Exception as e:
-#         prediction = f"⚠️ Не удалось получить толкование: {e}"
-
-#     user = await ensure_user(cb.from_user.id, cb.from_user.username)
-#     async with SessionLocal() as s:
-#         s.add(models.SpreadLog(user_id=user.id, theme=theme, spread=spread, cards={"cards": names}, cost=1))
-#         await s.commit()
-
-#     itog = _extract_itog(prediction)
-#     await state.update_data(
-#         last_theme=theme,
-#         last_spread=spread,
-#         last_question=user_question,
-#         last_cards=names,
-#         last_itog=itog,
-#         last_scenario=scenario_ctx,
-#         last_prediction_text=prediction,
-#     )
-
-#     kb = advice_inline_limits(True, True)
-#     sent = await _send_spread_media_with_caption(cb.message, prediction, reply_markup=kb)
-#     if not sent:
-#         await _edit_text_or_caption(cb.message, prediction, reply_markup=kb)
-
-
 # ---------- СОВЕТЫ ----------
 @router.callback_query(F.data.in_({"advice:1", "advice:3", "ownq:advice:1", "ownq:advice:3"}))
 async def advice_handler(cb: CallbackQuery, state: FSMContext):
@@ -308,27 +200,37 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     is_one = cb.data.endswith(":1")
     advice_count = 1 if is_one else 3
 
+    # доступ к расширенному совету возможен только при активной подписке
     has_pass = await pass_is_active(cb.from_user.id)
+
+    data = await state.get_data()
+    base_answer = (_get_message_text(cb.message) or data.get("last_prediction_text") or "").strip()
+    if not base_answer:
+        await _edit_text_or_caption(
+            cb.message,
+            "Чтобы получить совет, сначала сделайте расклад (или задайте свой вопрос).",
+            reply_markup=main_menu_inline()
+        )
+        return
 
     # --- Расширенный совет (3) — только по подписке ---
     if advice_count == 3:
         if not has_pass:
+            # Запоминаем намерение: после оплаты подписки сразу выдать расширенный совет
+            await state.update_data(pending_advice_after_payment=3)
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
-                #[InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
             ])
             await _edit_text_or_caption(
                 cb.message,
                 "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
-                "Оформите 30-дневный доступ — и сможете пользоваться и обычным, и расширенным советом.",
+                "Оформите 30-дневный доступ — и сразу получите расширенный совет к текущему раскладу.",
                 reply_markup=kb
             )
             return
 
-        # подписка активна → генерируем на 3
-        data = await state.get_data()
-        base_answer = (_get_message_text(cb.message) or data.get("last_prediction_text") or "").strip()
+        # подписка активна → генерируем 3 и оставляем кнопку расширенного совета
         try:
             cards = draw_cards(3)
             card_names = [c["name"] for c in cards]
@@ -343,25 +245,20 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         except Exception as e:
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=False))
+        # ВАЖНО: allow_three=True, чтобы кнопка не пропала при подписке
+        await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=True))
         return
 
     # --- Обычный совет (1) ---
+    # пытаемся списать из пакета; при подписке списания нет
     pkg_spent = await spend_one_advice(cb.from_user.id)
-    if not pkg_spent:
-        if has_pass:
-            pass
-        else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
-                # [InlineKeyboardButton(text="⬅️ К предсказанию", callback_data="advice:back")],
-                # [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
-            ])
-            await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
-            return
-
-    data = await state.get_data()
-    base_answer = (_get_message_text(cb.message) or data.get("last_prediction_text") or "").strip()
+    if not pkg_spent and not has_pass:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        ])
+        await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
+        return
 
     try:
         cards = draw_cards(1)
@@ -378,19 +275,21 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-    await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=True))
+    # Кнопка расширенного совета показывается только при активной подписке
+    await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=has_pass))
 
 
 @router.callback_query(F.data == "advice:back")
 async def advice_back_to_prediction(cb: CallbackQuery, state: FSMContext):
-    """Возврат к последнему предсказанию с кнопками советов."""
     await cb.answer()
     data = await state.get_data()
     prediction = (data.get("last_prediction_text") or "").strip()
     if not prediction:
         await _edit_text_or_caption(cb.message, "Предсказание недоступно. Попробуйте сделать расклад заново.", reply_markup=main_menu_inline())
         return
-    await _edit_text_or_caption(cb.message, prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=True))
+    # расширенный совет в инлайн-лимитах — только при активной подписке
+    has_pass = await pass_is_active(cb.from_user.id)
+    await _edit_text_or_caption(cb.message, prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=has_pass))
 
 
 # ---------- свой вопрос ----------
@@ -403,7 +302,7 @@ async def custom_start(cb: CallbackQuery, state: FSMContext):
         "Примеры:\n"
         "• Что поможет в работе на этой неделе?\n"
         "• Как наладить отношения с близким человеком?\n"
-        "• На что обратиться внимание в самочувствии?\n"
+        "• На что обратить внимание в самочувствии?\n"
     )
     await _edit_text_or_caption(cb.message, hint, reply_markup=back_to_menu_inline())
 
@@ -453,7 +352,9 @@ async def custom_receive(message: Message, state: FSMContext):
         last_prediction_text=prediction,
     )
 
-    kb = advice_inline_limits(allow_one=True, allow_three=True)
+    # показываем «Совет (1)» всегда; «Расширенный (3)» — только при подписке
+    has_pass = await pass_is_active(message.from_user.id)
+    kb = advice_inline_limits(allow_one=True, allow_three=has_pass)
     sent = await _send_spread_media_with_caption(message, prediction, reply_markup=kb)
     if not sent:
         await message.answer(prediction, reply_markup=kb)
@@ -520,7 +421,7 @@ async def buy_menu(cb: CallbackQuery):
 async def buy_pick(cb: CallbackQuery, bot: Bot):
     await cb.answer()
     if not PROVIDER_TOKEN:
-        await _edit_text_or_caption(cb.message, "⚠️ Платёжный провайдер не настроен. Добавьте PAYMENTS_PROVIDER_TOKEN в .env", reply_markup=main_menu_inline())
+        await _edit_text_or_caption(cb.message, "⚠️ Платежный провайдер не настроен. Добавьте PAYMENTS_PROVIDER_TOKEN в .env", reply_markup=main_menu_inline())
         return
 
     parts = cb.data.split(":")
@@ -569,6 +470,12 @@ async def pre_checkout(pre: PreCheckoutQuery, bot: Bot):
 
 @router.message(F.successful_payment)
 async def successful_payment(message: Message, state: FSMContext):
+    """
+    После оплаты:
+    • advice1 — сразу выдаём обычный совет
+    • advicepack3 — сразу выдаём обычный совет (если есть предсказание)
+    • pass30 — если был флаг pending_advice_after_payment=3 и есть предсказание — выдаём РАСШИРЕННЫЙ совет сразу
+    """
     sp = message.successful_payment
     payload = sp.invoice_payload or ""
     currency = (sp.currency or CURRENCY).strip()
@@ -590,12 +497,19 @@ async def successful_payment(message: Message, state: FSMContext):
         meta={"raw": sp.model_dump()},
     )
 
-    # 1) Разовый платёж за обычный совет
+    # --- обычный разовый совет ---
     if payload.startswith("advice1_"):
         await mark_purchase_credited(purchase_id)
 
         data = await state.get_data()
         yandex_answer = (data.get("last_prediction_text") or "").strip()
+
+        if not yandex_answer:
+            await message.answer(
+                "Оплата принята. Чтобы я дал совет — сначала сделайте расклад или задайте вопрос.",
+                reply_markup=main_menu_inline()
+            )
+            return
 
         try:
             advice_cards = draw_cards(1)
@@ -613,57 +527,108 @@ async def successful_payment(message: Message, state: FSMContext):
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
         note = f"\nID платежа: {charge_id}" if charge_id else ""
-        await message.answer(
-            advice_text + note,
-            reply_markup=_advice_back_kb(allow_three=True)
-        )
+        # расширенный совет доступен только при подписке
+        has_pass = await pass_is_active(message.from_user.id)
+        await message.answer(advice_text + note, reply_markup=_advice_back_kb(allow_three=has_pass))
         return
 
-    # 2) Пакет советов (3 шт.)
+    # --- пакет советов (3) ---
     if payload.startswith("advicepack3_"):
         await mark_purchase_credited(purchase_id)
         try:
-            from services.billing import grant_advice_pack, get_advice_balance_by_tg_id
+            from services.billing import grant_advice_pack
             await grant_advice_pack(user.id, qty=3, reason="advice_pack_3_purchase")
-            try:
-                from services.billing import pluralize_advices
-                bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
-                adv_note = f"\n🧠 Доступно: {pluralize_advices(bal_adv)}"
-            except Exception:
-                adv_note = ""
         except Exception:
-            adv_note = ""
+            pass
+
+        try:
+            bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
+            adv_note_bal = f"🧠 Доступно: {pluralize_advices(bal_adv)}"
+        except Exception:
+            adv_note_bal = ""
+
+        data = await state.get_data()
+        yandex_answer = (data.get("last_prediction_text") or "").strip()
 
         note = f"\nID платежа: {charge_id}" if charge_id else ""
+        if not yandex_answer:
+            await message.answer(
+                f"✅ Пакет советов (3) активирован.\n{adv_note_bal}{note}\n\n"
+                "Сделайте расклад или задайте вопрос — и сразу сможете получить совет.",
+                reply_markup=main_menu_inline()
+            )
+            return
+
+        _ = await spend_one_advice(message.from_user.id)
+
+        try:
+            cards = draw_cards(1)
+            card_names = [c["name"] for c in cards]
+        except Exception:
+            card_names = []
+
+        try:
+            advice_text = await gpt_make_advice_from_yandex_answer(
+                yandex_answer_text=yandex_answer,
+                advice_cards_list=card_names,
+                advice_count=1,
+            )
+        except Exception as e:
+            advice_text = f"⚠️ Не удалось получить совет: {e}"
+
+        try:
+            bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
+            adv_note_bal = f"🧠 Теперь доступно: {pluralize_advices(bal_adv)}"
+        except Exception:
+            pass
+
+        # Расширенный совет по пакету НЕ доступен — только по подписке
+        has_pass = await pass_is_active(message.from_user.id)
         await message.answer(
-            f"✅ Пакет советов (3) активирован.{adv_note}{note}",
-            reply_markup=main_menu_inline()
+            f"✅ Пакет советов (3) активирован.{note}\n{adv_note_bal}\n\n" + advice_text,
+            reply_markup=_advice_back_kb(allow_three=has_pass)
         )
         return
 
-    # 3) Пакеты сообщений
-    if payload.startswith("credits_"):
-        parts = payload.split("_")
-        credits = int(parts[1])
-
-        await grant_credits(user.id, credits, reason=f"payment_{total_amount}")
-        await mark_purchase_credited(purchase_id)
-
-        bal = await get_user_balance(message.from_user.id)
-        note = f"\nID платежа: {charge_id}" if charge_id else ""
-        await message.answer(
-            f"✅ Пакет на {credits} сообщений активирован.\n"
-            f"Баланс: {bal}.{note}",
-            reply_markup=main_menu_inline()
-        )
-        return
-
-    # 4) Подписка PASS
+    # --- подписка PASS (30 дней) ---
     if payload.startswith("pass30_"):
         expires = await activate_pass_month(user.id, message.from_user.id, plan="pass_unlim")
         await mark_purchase_credited(purchase_id)
 
+        data = await state.get_data()
+        pending = data.get("pending_advice_after_payment")
+        yandex_answer = (data.get("last_prediction_text") or "").strip()
+
         note = f"\nID платежа: {charge_id}" if charge_id else ""
+
+        # Если пользователь пришёл из расширенного совета — сразу выдаём 3 карты
+        if pending == 3 and yandex_answer:
+            try:
+                cards = draw_cards(3)
+                card_names = [c["name"] for c in cards]
+            except Exception:
+                card_names = []
+            try:
+                advice_text = await gpt_make_advice_from_yandex_answer(
+                    yandex_answer_text=yandex_answer,
+                    advice_cards_list=card_names,
+                    advice_count=3,
+                )
+            except Exception as e:
+                advice_text = f"⚠️ Не удалось получить совет: {e}"
+
+            # ВАЖНО: после выдачи — кнопка расширенного остаётся (allow_three=True при активной подписке)
+            await message.answer(
+                "✅ Подписка на 30 дней активирована.\n"
+                f"Доступ до: {_format_date_human(expires)}{note}\n\n"
+                + advice_text,
+                reply_markup=_advice_back_kb(allow_three=True)
+            )
+            # очистим флаг
+            await state.update_data(pending_advice_after_payment=None)
+            return
+
+        # Обычная ветка — без немедленного совета
         await message.answer(
             "✅ Подписка на 30 дней активирована.\n"
             f"Доступ до: {_format_date_human(expires)}\n"
@@ -671,9 +636,11 @@ async def successful_payment(message: Message, state: FSMContext):
             f"{note}",
             reply_markup=main_menu_inline()
         )
+        # на всякий случай очистим флаг
+        await state.update_data(pending_advice_after_payment=None)
         return
 
-    # 5) Неизвестный payload
+    # --- неизвестный payload ---
     note = f"\nID платежа: {charge_id}" if charge_id else ""
     await message.answer(f"✅ Оплата получена.{note}", reply_markup=main_menu_inline())
 
@@ -704,7 +671,7 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
     await _edit_text_or_caption(cb.message, text, reply_markup=kb)
 
 
-# ---------- глушилка на случай «эхо» старых Reply-кнопок ----------
+# ---------- глушилка ----------
 SILENT_LABELS = {
     "🗂 Выбрать тему", "📝 Свой вопрос", "🎁 Промокод", "👤 Профиль",
     "🤝 Пригласить друга", "🛒 Купить сообщения",
