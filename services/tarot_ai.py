@@ -20,6 +20,16 @@ YANDEX_TEMPERATURE = float(os.getenv("YANDEX_TEMPERATURE", "0.7"))
 YANDEX_MAX_TOKENS  = int(os.getenv("YANDEX_MAX_TOKENS", "2000"))
 
 
+# ===================== КОНФИГ ПЕРЕВЁРНУТЫХ КАРТ =====================
+# Можно отключить перевёрнутые карты полностью и настроить вероятность.
+TAROT_ALLOW_REVERSED: bool = os.getenv("TAROT_ALLOW_REVERSED", "1").strip() not in {"0", "false", "False", ""}
+try:
+    TAROT_REVERSED_PROB: float = float(os.getenv("TAROT_REVERSED_PROB", "0.5"))
+    TAROT_REVERSED_PROB = 0.0 if TAROT_REVERSED_PROB < 0 else (1.0 if TAROT_REVERSED_PROB > 1 else TAROT_REVERSED_PROB)
+except ValueError:
+    TAROT_REVERSED_PROB = 0.5
+
+
 # ===================== КАРТЫ =====================
 CARDS_PATH = Path(__file__).resolve().parent.parent / "data" / "tarot_cards.json"
 
@@ -35,12 +45,40 @@ def _cards() -> List[Dict[str, Any]]:
         _CARDS_CACHE = load_cards()
     return _CARDS_CACHE
 
-def draw_cards(num: int) -> List[Dict[str, Any]]:
-    """Вытягивает num карт из JSON-колоды (без перевёрнутых)."""
+def draw_cards(
+    num: int,
+    *,
+    allow_reversed: Optional[bool] = None,
+    reversed_prob: Optional[float] = None
+) -> List[Dict[str, Any]]:
+    """
+    Вытягивает num карт из JSON-колоды.
+    НИЧЕГО не меняем в других файлах: при перевороте подменяем поле `name`
+    на "<Имя> (перевёрнутая)", оригинальное имя сохраняем в `base_name`.
+    В словарь карты также кладём флаг `reversed: bool`.
+
+    Управление:
+      - allow_reversed: None -> берётся из TAROT_ALLOW_REVERSED
+      - reversed_prob: None -> берётся из TAROT_REVERSED_PROB
+    """
     cards = _cards()
     if num > len(cards):
         raise ValueError(f"Запрошено {num} карт, но в колоде только {len(cards)}")
-    return random.sample(cards, num)
+
+    use_reversed = TAROT_ALLOW_REVERSED if allow_reversed is None else bool(allow_reversed)
+    prob = TAROT_REVERSED_PROB if reversed_prob is None else max(0.0, min(1.0, float(reversed_prob)))
+
+    picked = random.sample(cards, num)
+    result: List[Dict[str, Any]] = []
+    for c in picked:
+        c = dict(c)  # не пачкаем общий кэш
+        base_name = c.get("name") or c.get("title") or str(c)
+        c["base_name"] = base_name
+        is_rev = use_reversed and (random.random() < prob)
+        c["reversed"] = bool(is_rev)
+        c["name"] = f"{base_name} (перевёрнутая)" if is_rev else base_name
+        result.append(c)
+    return result
 
 
 # ===================== ХЕЛПЕРЫ ФОРМАТИРОВАНИЯ =====================

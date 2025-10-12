@@ -1,19 +1,31 @@
 # handlers/clarify_flow.py
 from __future__ import annotations
+
+"""
+Экран выбора направлений/сценариев раскладов с полноценной индикацией «печатает…»
+во время всех долгих операций LLM. Без гифок в ходе советов/раскладов.
+Интро-медиа (если есть) — только как вступление (data/spreads/*.mp4|.gif|.webm).
+"""
+
 from typing import Any, Dict, List, Tuple
 import os
 import re
 import random
+import asyncio
+import contextlib
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.enums import ChatAction
 
 from services.tarot_ai import draw_cards, gpt_make_prediction
 from services.billing import ensure_user, spend_one_or_pass
 from keyboards_inline import advice_inline_limits
 from db import SessionLocal, models
+
 
 router = Router()
 
@@ -31,7 +43,7 @@ DIRECTIONS: List[Tuple[str, str]] = [
 # Сценарии по направлениям
 # =========================
 
-# --- 1) Отношения (ваши текущие сценарии) ---
+# --- 1) Отношения ---
 SCENARIOS_LOVE: List[Dict[str, Any]] = [
     {"title": "На отношение к вам другого человека",
      "points": ["мысли", "чувства", "подсознание"]},
@@ -121,7 +133,6 @@ SCENARIOS_LOVE: List[Dict[str, Any]] = [
      ]},
 ]
 
-# --- 2) Будущее (заглушка; заполним позже) ---
 # --- 2) Будущее ---
 SCENARIOS_FUTURE: List[Dict[str, Any]] = [
     {
@@ -186,8 +197,6 @@ SCENARIOS_FUTURE: List[Dict[str, Any]] = [
     },
 ]
 
-
-# --- 3) Самопознание / познание другого (заглушка) ---
 # --- 3) Самопознание и познание другого человека ---
 SCENARIOS_SELF: List[Dict[str, Any]] = [
     {
@@ -230,8 +239,6 @@ SCENARIOS_SELF: List[Dict[str, Any]] = [
     },
 ]
 
-
-# --- 4) Работа (заглушка) ---
 # --- 4) Работа ---
 SCENARIOS_WORK: List[Dict[str, Any]] = [
     {
@@ -303,7 +310,6 @@ SCENARIOS_WORK: List[Dict[str, Any]] = [
         ],
     },
 ]
-
 
 SCENARIOS_BY_KEY = {
     "love": SCENARIOS_LOVE,
@@ -380,7 +386,45 @@ def sanitize_summary(text: str) -> str:
     t = re.sub(r"\n{3,}", "\n\n", t).strip()
     return t
 
-# ------------------ Медиа из data/spreads ------------------
+# ------------------ Индикация «печатает…» ------------------
+class _TypingAction:
+    """
+    Контекст-менеджер: пока внутри — раз в interval сек отправляется send_chat_action(TYPING).
+    Использование:
+        async with typing_action(message.bot, message.chat.id):
+            ... долгий вызов ...
+    """
+    def __init__(self, bot, chat_id: int, interval: float = 4.0):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.interval = interval
+        self._task: asyncio.Task | None = None
+
+    async def __aenter__(self):
+        async def _loop():
+            try:
+                while True:
+                    await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
+                    await asyncio.sleep(self.interval)
+            except asyncio.CancelledError:
+                pass
+
+        self._task = asyncio.create_task(_loop())
+        # мгновенно показать «печатает…»
+        await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._task:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        self._task = None
+
+def typing_action(bot, chat_id: int, interval: float = 4.0) -> _TypingAction:
+    return _TypingAction(bot, chat_id, interval)
+
+# ------------------ Медиа из data/spreads (опционально) ------------------
 def _pick_intro_media() -> str | None:
     folder = os.path.join("data", "spreads")
     if not os.path.isdir(folder):
@@ -390,6 +434,10 @@ def _pick_intro_media() -> str | None:
     return random.choice(files) if files else None
 
 async def send_intro_with_caption(cb: CallbackQuery, caption: str) -> None:
+    """
+    Интро-медиа (если есть). В caption — только шапка.
+    «Карта: ...» отправляется отдельными сообщениями далее.
+    """
     path = _pick_intro_media()
     if not path:
         await cb.message.answer(caption, parse_mode=None)
@@ -406,6 +454,14 @@ async def send_intro_with_caption(cb: CallbackQuery, caption: str) -> None:
     except Exception:
         await cb.message.answer(caption, parse_mode=None)
 
+# ------------------ Сервисные утилиты ------------------
+async def _safe_cb_answer(cb: CallbackQuery, text: str | None = None, show_alert: bool = False) -> None:
+    """Безопасный ответ на callback — сразу гасим «часики», игнорируем TelegramBadRequest."""
+    try:
+        await cb.answer(text=text, show_alert=show_alert)
+    except TelegramBadRequest:
+        pass
+
 # ------------------ Клавиатуры ------------------
 def numbers_kb(count: int, prefix: str, add_menu: bool = True) -> InlineKeyboardMarkup:
     rows, row = [], []
@@ -420,11 +476,13 @@ def numbers_kb(count: int, prefix: str, add_menu: bool = True) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _norm_menu_btn(text: str) -> str:
-    t = strip_emojis(text or "")
-    t = re.sub(r"(?i)\s*в\s*меню\s*", "В меню", t).strip()
+    t = re.sub(r"(?i)\s*в\s*меню\s*", "В меню", strip_emojis(text or "")).strip()
     return "В меню" if re.search(r"(?i)меню", t) else (text or "")
 
 def merge_advice_nav_kb(advice_kb: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    """
+    Добавляет к советам кнопки 'Ещё по списку' и 'В меню', убирает дубли и ссылку 'к предсказанию'.
+    """
     new_rows: List[List[InlineKeyboardButton]] = []
     seen_pairs = set()
     seen_menu = False
@@ -465,10 +523,9 @@ def merge_advice_nav_kb(advice_kb: InlineKeyboardMarkup) -> InlineKeyboardMarkup
 @router.callback_query(F.data == "menu:theme")
 async def open_direction_list(cb: CallbackQuery, state: FSMContext):
     await state.clear()
+    await _safe_cb_answer(cb)
 
-    blocks: List[str] = []
-    for idx, (title, _key) in enumerate(DIRECTIONS, start=1):
-        blocks.append(f"{idx}. {title}")
+    blocks: List[str] = [f"{idx}. {title}" for idx, (title, _key) in enumerate(DIRECTIONS, start=1)]
     text = "Выберите направление\n\n" + "\n".join(blocks) + "\n\nНажмите цифру ниже 👇"
 
     try:
@@ -476,16 +533,18 @@ async def open_direction_list(cb: CallbackQuery, state: FSMContext):
     except Exception:
         await cb.message.answer(text, reply_markup=numbers_kb(len(DIRECTIONS), prefix="cat"), parse_mode=None)
     await state.set_state(ClarifyFSM.picking_direction)
-    await cb.answer()
 
 # =========================
 # Выбор НАПРАВЛЕНИЯ → показать сценарии
 # =========================
 @router.callback_query(ClarifyFSM.picking_direction, F.data.startswith("cat:"))
 async def category_chosen(cb: CallbackQuery, state: FSMContext):
+    await _safe_cb_answer(cb)
+
     idx = int(cb.data.split(":")[1]) - 1
     if idx < 0 or idx >= len(DIRECTIONS):
-        await cb.answer("Некорректный выбор"); return
+        await cb.answer("Некорректный выбор")
+        return
 
     title, key = DIRECTIONS[idx]
     scenarios = SCENARIOS_BY_KEY.get(key, [])
@@ -500,11 +559,10 @@ async def category_chosen(cb: CallbackQuery, state: FSMContext):
             ]),
             parse_mode=None
         )
-        await cb.answer(); return
+        return
 
     blocks: List[str] = []
     for i, sc in enumerate(scenarios, start=1):
-        # как просили — текстом список, снизу будут цифры
         inner = "\n".join([f"   • {p}" for p in sc.get("points", [])]) if sc.get("points") else ""
         blocks.append(f"{i}. {sc['title']}" + (f"\n{inner}" if inner else ""))
 
@@ -515,13 +573,21 @@ async def category_chosen(cb: CallbackQuery, state: FSMContext):
     except Exception:
         await cb.message.answer(text, reply_markup=numbers_kb(len(scenarios), prefix="scenario"), parse_mode=None)
     await state.set_state(ClarifyFSM.waiting_choice)
-    await cb.answer()
 
 # =========================
 # ВЫБОР СЦЕНАРИЯ внутри направления
 # =========================
 @router.callback_query(ClarifyFSM.waiting_choice, F.data.startswith("scenario:"))
 async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
+    await _safe_cb_answer(cb)
+
+    # Плейсхолдер статуса (без гифок)
+    try:
+        if cb.message:
+            await cb.message.edit_text("🔮 Готовлю расклад…", parse_mode=None)
+    except TelegramBadRequest:
+        pass
+
     data = await state.get_data()
     dir_key = data.get("current_direction_key")
     dir_title = data.get("current_direction_title") or THEME_BY_KEY.get(dir_key, "Тема")
@@ -529,23 +595,25 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
     scenarios = SCENARIOS_BY_KEY.get(dir_key, [])
     idx = int(cb.data.split(":")[1]) - 1
     if idx < 0 or idx >= len(scenarios):
-        await cb.answer("Некорректный выбор"); return
+        await cb.message.answer("Некорректный выбор")
+        return
 
     scenario = scenarios[idx]
     points = scenario.get("points", [])
-    n = max(1, len(points))  # хотя бы одна карта
+    n = max(1, len(points))
 
     # списание
     ok, src = await spend_one_or_pass(cb.from_user.id)
     if not ok:
+        kb = numbers_kb(len(DIRECTIONS), prefix="cat")
         if src == "pass_rate_limit":
-            await cb.message.edit_text("Слишком часто. Попробуйте через минуту.", reply_markup=numbers_kb(len(DIRECTIONS), prefix="cat"), parse_mode=None)
+            await cb.message.edit_text("⏳ Слишком часто. Попробуйте через минуту.", reply_markup=kb, parse_mode=None)
         elif src == "pass_day_limit":
-            await cb.message.edit_text("Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=numbers_kb(len(DIRECTIONS), prefix="cat"), parse_mode=None)
+            await cb.message.edit_text("📅 Дневной лимит подписки исчерпан. Попробуйте завтра.", reply_markup=kb, parse_mode=None)
         else:
-            await cb.message.edit_text("Нет доступных сообщений. Купите пакет или оформите подписку 🛒", parse_mode=None)
+            await cb.message.edit_text("❌ Нет доступных сообщений. Купите пакет или оформите подписку 🛒", parse_mode=None)
         await state.clear()
-        await cb.answer(); return
+        return
 
     # тянем карты
     try:
@@ -572,70 +640,85 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
     header = f"{dir_title} — {scenario['title']}\nКарты: {', '.join(card_names)}"
     combined_parts: List[str] = [f"{dir_title} — {scenario['title']}", f"Карты: {', '.join(card_names)}", ""]
 
+    # Интро (если есть медиа)
+    await send_intro_with_caption(cb, header)
+
     # ---------- первый пункт ----------
     start_i = 0
     if points:
         c0 = card_names[0] if card_names else "—"
-        try:
-            raw0 = await gpt_make_prediction(
-                question=points[0], theme=dir_title, spread="auto", cards_list=c0, scenario_ctx=scenario["title"]
-            )
-            a0 = sanitize_answer(raw0)
-        except Exception:
-            a0 = "Не удалось получить толкование. Попробуйте ещё раз позже."
+        async with typing_action(cb.message.bot, cb.message.chat.id):
+            try:
+                raw0 = await asyncio.wait_for(
+                    gpt_make_prediction(
+                        question=points[0], theme=dir_title, spread="auto", cards_list=c0, scenario_ctx=scenario["title"]
+                    ),
+                    timeout=60
+                )
+                a0 = sanitize_answer(raw0)
+            except asyncio.TimeoutError:
+                a0 = "Толкование готовится дольше обычного. Попробуйте ещё раз."
+            except Exception:
+                a0 = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
-        first_caption = f"{header}\nКарта: {c0}\n\n{a0}"
-        await send_intro_with_caption(cb, first_caption)
+        # ВАЖНО: «Карта: ...» — отдельным сообщением
+        first_block = f"Карта: {c0}\n\n{a0}"
+        await cb.message.answer(first_block, parse_mode=None)
 
         combined_parts += [f"Карта: {c0}\n{a0}", ""]
         start_i = 1
-    else:
-        # если points пуст — просто отправим шапку
-        await send_intro_with_caption(cb, header)
 
     # ---------- остальные пункты ----------
     for i in range(start_i, len(points)):
         c = card_names[i] if i < len(card_names) else "—"
-        try:
-            raw = await gpt_make_prediction(
-                question=points[i], theme=dir_title, spread="auto", cards_list=c, scenario_ctx=scenario["title"]
-            )
-            a = sanitize_answer(raw)
-        except Exception:
-            a = "Не удалось получить толкование. Попробуйте ещё раз позже."
+        async with typing_action(cb.message.bot, cb.message.chat.id):
+            try:
+                raw = await asyncio.wait_for(
+                    gpt_make_prediction(
+                        question=points[i], theme=dir_title, spread="auto", cards_list=c, scenario_ctx=scenario["title"]
+                    ),
+                    timeout=60
+                )
+                a = sanitize_answer(raw)
+            except asyncio.TimeoutError:
+                a = "Толкование готовится дольше обычного. Попробуйте ещё раз."
+            except Exception:
+                a = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
         block = f"Карта: {c}\n\n{a}"
         await cb.message.answer(block, parse_mode=None)
         combined_parts += [f"Карта: {c}\n{a}", ""]
 
     # ---------- общий итог ----------
-# ---------- общий итог ----------
-    try:
-        summary_raw = await gpt_make_prediction(
-            question=(
-                "Сформулируй магический, вдохновляющий итог расклада в 3–6 предложениях. "
-                "Пиши образно и осмысленно, как будто это интуитивное послание судьбы. "
-                "Не перечисляй карты и пункты, не упоминай их названия. "
-                "Избегай советов и прямых указаний, но передай внутренний смысл, настроение и энергию расклада. "
-                "Формулируй естественным языком, плавно и с лёгкой мистикой, без эмодзи и списков."
-            ),
-            theme=dir_title,
-            spread="summary",
-            cards_list=", ".join(card_names),
-            scenario_ctx=scenario["title"],
-        )
-        final_summary = sanitize_summary(summary_raw)
-    except Exception:
-        final_summary = "Итог временно недоступен."
+    async with typing_action(cb.message.bot, cb.message.chat.id):
+        try:
+            summary_raw = await asyncio.wait_for(
+                gpt_make_prediction(
+                    question=(
+                        "Сформулируй магический, вдохновляющий итог расклада в 3–6 предложениях. "
+                        "Пиши образно и осмысленно, как будто это интуитивное послание судьбы. "
+                        "Не перечисляй карты и пункты, не упоминай их названия. "
+                        "Избегай советов и прямых указаний, но передай внутренний смысл, настроение и энергию расклада. "
+                        "Формулируй естественным языком, плавно и с лёгкой мистикой, без эмодзи и списков."
+                    ),
+                    theme=dir_title,
+                    spread="summary",
+                    cards_list=", ".join(card_names),
+                    scenario_ctx=scenario["title"],
+                ),
+                timeout=60
+            )
+            final_summary = sanitize_summary(summary_raw)
+        except asyncio.TimeoutError:
+            final_summary = "Итог готовится дольше обычного. Попробуйте ещё раз."
+        except Exception:
+            final_summary = "Итог временно недоступен."
 
-    # 👇 Добавляем автоматическую заглавную букву
+    # Заглавная буква
     if final_summary and len(final_summary) > 1:
         final_summary = final_summary[0].upper() + final_summary[1:]
 
     await cb.message.answer(f"Итог\n\n{final_summary}\n\n{MAGIC_FOOTER}", parse_mode=None)
-
-    
-    
 
     # ---------- состояние для советов ----------
     combined_text = "\n".join(combined_parts).strip()
@@ -658,4 +741,3 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
         "Вы можете получить совет на основе разбора или выбрать другое направление.",
         reply_markup=final_kb
     )
-    await cb.answer()
