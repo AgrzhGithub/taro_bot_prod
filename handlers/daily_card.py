@@ -34,7 +34,7 @@ def _main_menu_kb():
         # fallback
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")]
+                [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")]
             ]
         )
 
@@ -43,7 +43,7 @@ def _daily_menu_kb():
         [InlineKeyboardButton(text="🗓 Подписаться на карту дня", callback_data="daily:on")],
         [InlineKeyboardButton(text="⏰ Выбрать время", callback_data="daily:time")],
         [InlineKeyboardButton(text="❌ Отписаться", callback_data="daily:off")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def _daily_time_kb():

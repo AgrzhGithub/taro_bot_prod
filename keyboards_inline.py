@@ -18,7 +18,7 @@ def theme_inline() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="Работа", callback_data="theme:Работа")],
         [InlineKeyboardButton(text="Судьба", callback_data="theme:Судьба"),
          InlineKeyboardButton(text="Самопознание", callback_data="theme:Саморазвитие")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def spread_inline() -> InlineKeyboardMarkup:
@@ -27,7 +27,7 @@ def spread_inline() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="Подкова", callback_data="spread:Подкова")],
         [InlineKeyboardButton(text="Алхимик", callback_data="spread:Алхимик")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="nav:theme"),
-         InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+         InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def buy_inline() -> InlineKeyboardMarkup:
@@ -37,25 +37,25 @@ def buy_inline() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="30 сообщений — 199₽", callback_data="buy:credits:30:19900")],
         [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
         [InlineKeyboardButton(text="Подписка (30 дней) — 299₽", callback_data="buy:pass30:29900")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def back_to_menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")]
     ])
 
 def daily_inline():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗓 Подписаться на карту дня", callback_data="daily:on")],
         [InlineKeyboardButton(text="❌ Отписаться от карты дня", callback_data="daily:off")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def promo_inline():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="menu:promo")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
 def scenario_inline(theme_id: str, scenarios: list) -> InlineKeyboardMarkup:
@@ -73,11 +73,11 @@ def advice_inline_limits(allow_one: bool = True, allow_three: bool = True) -> In
         rows.append([InlineKeyboardButton(text="🧭 Обычный совет (1 карта)", callback_data="advice:1")])
     if allow_three:
         rows.append([InlineKeyboardButton(text="🔮 Расширенный совет (3 карты)", callback_data="advice:3")])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def advice_pack_buy_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])

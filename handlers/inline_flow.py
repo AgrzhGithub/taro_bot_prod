@@ -220,7 +220,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
             await state.update_data(pending_advice_after_payment=3)
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+                [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
             ])
             await _edit_text_or_caption(
                 cb.message,
@@ -255,7 +255,7 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
     if not pkg_spent and not has_pass:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
         ])
         await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
         return
@@ -543,7 +543,7 @@ async def successful_payment(message: Message, state: FSMContext):
 
         try:
             bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
-            adv_note_bal = f"🧠 Доступно: {pluralize_advices(bal_adv)}"
+            adv_note_bal = f"Доступно: {pluralize_advices(bal_adv)}"
         except Exception:
             adv_note_bal = ""
 
@@ -578,7 +578,7 @@ async def successful_payment(message: Message, state: FSMContext):
 
         try:
             bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
-            adv_note_bal = f"🧠 Теперь доступно: {pluralize_advices(bal_adv)}"
+            adv_note_bal = f"Теперь доступно: {pluralize_advices(bal_adv)}"
         except Exception:
             pass
 
@@ -660,7 +660,7 @@ async def feedback_start(cb: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Написать разработчику", url=url)],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:menu")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
     ])
 
     text = (
@@ -676,7 +676,7 @@ SILENT_LABELS = {
     "🗂 Выбрать тему", "📝 Свой вопрос", "🎁 Промокод", "👤 Профиль",
     "🤝 Пригласить друга", "🛒 Купить сообщения",
     "Любовь", "Работа", "Судьба", "Саморазвитие",
-    "Три карты", "Подкова", "Алхимик", "⬅️ В меню", "🔙 Назад"
+    "Три карты", "Подкова", "Алхимик", "🏠 В меню", "🔙 Назад"
 }
 @router.message(F.text.in_(SILENT_LABELS))
 async def swallow_reply_keyboard_echo(message: Message):
