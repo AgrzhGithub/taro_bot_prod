@@ -437,7 +437,7 @@ async def send_card_of_day(bot, chat_id: int):
 
     # Небольшая чистка текста и пробел перед «Итог:»
     interpretation_clean = re.sub(r'^\s*\d+[)\.]\s*', '', interpretation, flags=re.MULTILINE)
-    interpretation_clean = interpretation_clean.replace("Итог:", "\n\nИтог:")
+    # interpretation_clean = interpretation_clean.replace("Итог:", "\n\nИтог:")
 
     caption = f"🗓 Карта дня\n\n🃏 {name}\n\n{interpretation_clean}"
 

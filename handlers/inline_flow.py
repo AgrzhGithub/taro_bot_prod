@@ -1,12 +1,8 @@
 # handlers/inline_flow.py
 from __future__ import annotations
 
-"""
-Главное меню, советы, пользовательский вопрос, покупки.
-Добавлено: универсальный контекст-менеджер typing_action(...) для индикации «печатает…»
-во время всех долгих операций (LLM-запросы при советах, раскладах и автосовете после оплаты).
-"""
-
+from aiogram.enums import ChatAction
+import contextlib
 from services import tarot_ai
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart
@@ -17,12 +13,11 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.enums import ChatAction
 from typing import List
 import os
-from datetime import datetime, date
+import re
 import asyncio
-import contextlib
+from datetime import datetime, date
 
 from sqlalchemy import select
 
@@ -47,6 +42,7 @@ from db import SessionLocal, models
 
 router = Router()
 
+
 # ---------- FSM ----------
 class PromoFSM(StatesGroup):
     waiting_code = State()
@@ -56,56 +52,7 @@ class CustomFSM(StatesGroup):
     waiting_question = State()
 
 
-# ---------- Индикация «печатает…» ----------
-class _TypingAction:
-    """
-    Контекст-менеджер: пока внутри — раз в interval сек отправляется send_chat_action(TYPING).
-    Использование:
-        async with typing_action(bot, chat_id):
-            ... длительная операция ...
-    """
-    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0):
-        self.bot = bot
-        self.chat_id = chat_id
-        self.interval = interval
-        self._task: asyncio.Task | None = None
-
-    async def __aenter__(self):
-        async def _loop():
-            try:
-                while True:
-                    await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
-                    await asyncio.sleep(self.interval)
-            except asyncio.CancelledError:
-                pass
-        self._task = asyncio.create_task(_loop())
-        # мгновенно показать «печатает…»
-        await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        if self._task:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-        self._task = None
-
-
-def typing_action(bot: Bot, chat_id: int, interval: float = 4.0) -> _TypingAction:
-    return _TypingAction(bot, chat_id, interval)
-
-
 # ---------- Утилиты ----------
-async def _safe_cb_answer(cb: CallbackQuery, text: str | None = None, show_alert: bool = False) -> None:
-    """
-    Безопасный ответ на callback — сразу гасим «часики» и не падаем,
-    если query протух (TelegramBadRequest).
-    """
-    try:
-        await cb.answer(text=text, show_alert=show_alert)
-    except TelegramBadRequest:
-        pass
-
 def _card_names(cards) -> list[str]:
     names = []
     for c in cards:
@@ -116,6 +63,25 @@ def _card_names(cards) -> list[str]:
         else:
             names.append(str(c))
     return names
+
+@contextlib.asynccontextmanager
+async def typing_action(bot: Bot, chat_id: int, interval: float = 4.0):
+    stop = False
+    async def _loop():
+        while not stop:
+            with contextlib.suppress(Exception):
+                await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            await asyncio.sleep(interval)
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        nonlocal_stop = True  # метка только для читабельности
+        stop = True
+        task.cancel()
+        with contextlib.suppress(Exception):
+            # НЕ await task — чтобы не повиснуть на CancelledError
+            pass
 
 
 def _format_date_human(val) -> str:
@@ -168,6 +134,52 @@ async def _edit_text_or_caption(msg: Message, text: str, reply_markup=None) -> b
     except TelegramBadRequest:
         await msg.answer(text, reply_markup=reply_markup)
         return False
+
+# --- Индикация "печатает..." во время долгих операций ---
+@contextlib.asynccontextmanager
+async def typing_action(bot, chat_id: int, interval: float = 4.0):
+    """
+    Периодически шлёт ChatAction.TYPING, пока выполняется блок внутри with.
+    Без await task после cancel(), чтобы не зависать.
+    """
+    stop = False
+    async def _loop():
+        while not stop:
+            with contextlib.suppress(Exception):
+                await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            await asyncio.sleep(interval)
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        stop = True
+        task.cancel()
+
+
+
+# --- Надёжный разбор текста на блоки по картам + Итог ---
+_CARD_BLOCK_RE = re.compile(
+    r'^\s*(Карта:\s*(?P<title>.+?))\s*(?:\r?\n)+(?P<body>.*?)(?=^\s*Карта:|\Z)',
+    re.S | re.M
+)
+
+def split_card_blocks_and_itog(text: str):
+    text = (text or "").strip()
+    blocks = []
+    for m in _CARD_BLOCK_RE.finditer(text):
+        blocks.append({
+            "title": m.group("title").strip(),  # "Карта: XXX" без слова "Карта:"
+            "body":  m.group("body").strip()
+        })
+
+    # Итог вынимаем снизу, если есть
+    itog_match = re.search(r'^\s*Итог[:\s]*\r?\n(?P<itog>.*)\Z', text, re.S | re.I | re.M)
+    if itog_match:
+        itog = itog_match.group("itog").strip()
+    else:
+        itog = _extract_itog(text)
+
+    return blocks, itog
 
 
 # ---------- Локальные клавиатуры для советов ----------
@@ -227,7 +239,7 @@ async def menu_cmd(message: Message):
 
 @router.callback_query(F.data == "menu:help")
 async def help_screen(cb: CallbackQuery):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     txt = (
         "❓ Помощь\n\n"
         "• 1 расклад = 1 сообщение.\n"
@@ -245,24 +257,17 @@ async def help_screen(cb: CallbackQuery):
 @router.callback_query(F.data == "nav:menu")
 async def nav_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await _safe_cb_answer(cb)
+    await cb.answer()
     await _edit_text_or_caption(cb.message, "📋 Главное меню:", reply_markup=main_menu_inline())
 
 
 # ---------- СОВЕТЫ ----------
 @router.callback_query(F.data.in_({"advice:1", "advice:3", "ownq:advice:1", "ownq:advice:3"}))
 async def advice_handler(cb: CallbackQuery, state: FSMContext):
-    # 1) Мгновенно гасим «часики»
-    await _safe_cb_answer(cb)
+    await cb.answer()
 
     is_one = cb.data.endswith(":1")
     advice_count = 1 if is_one else 3
-
-    # 2) Плейсхолдер до любых долгих операций
-    try:
-        await _edit_text_or_caption(cb.message, "🧭 Пишу совет…")
-    except TelegramBadRequest:
-        pass
 
     # доступ к расширенному совету возможен только при активной подписке
     has_pass = await pass_is_active(cb.from_user.id)
@@ -277,88 +282,81 @@ async def advice_handler(cb: CallbackQuery, state: FSMContext):
         )
         return
 
-    async with typing_action(cb.message.bot, cb.message.chat.id):
-        # --- Расширенный совет (3) — только по подписке ---
-        if advice_count == 3:
-            if not has_pass:
-                # Запоминаем намерение: после оплаты подписки сразу выдать расширенный совет
-                await state.update_data(pending_advice_after_payment=3)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
-                    [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
-                ])
-                await _edit_text_or_caption(
-                    cb.message,
-                    "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
-                    "Оформите 30-дневный доступ — и сразу получите расширенный совет к текущему раскладу.",
-                    reply_markup=kb
-                )
-                return
-
-            try:
-                cards = draw_cards(3)
-                card_names = [c["name"] for c in cards]
-            except Exception:
-                card_names = []
-            try:
-                advice_text = await asyncio.wait_for(
-                    gpt_make_advice_from_yandex_answer(
-                        yandex_answer_text=base_answer,
-                        advice_cards_list=card_names,
-                        advice_count=3,
-                    ),
-                    timeout=60
-                )
-            except asyncio.TimeoutError:
-                advice_text = "Совет готовится дольше обычного. Попробуйте ещё раз."
-            except Exception as e:
-                advice_text = f"⚠️ Не удалось получить совет: {e}"
-
-            await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=True))
-            return
-
-        # --- Обычный совет (1) ---
-        # списываем из пакета; при подписке списания нет
-        pkg_spent = await spend_one_advice(cb.from_user.id)
-        if not pkg_spent and not has_pass:
+    # --- Расширенный совет (3) — только по подписке ---
+    if advice_count == 3:
+        if not has_pass:
+            # Запоминаем намерение: после оплаты подписки сразу выдать расширенный совет
+            await state.update_data(pending_advice_after_payment=3)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
+                [InlineKeyboardButton(text="Оформить подписку — 299₽", callback_data="buy:pass30:29900")],
                 [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
             ])
-            await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
+            await _edit_text_or_caption(
+                cb.message,
+                "🔒 Расширенный совет (3 карты) доступен по подписке.\n"
+                "Оформите 30-дневный доступ — и сразу получите расширенный совет к текущему раскладу.",
+                reply_markup=kb
+            )
             return
 
+        # подписка активна → генерируем 3 и оставляем кнопку расширенного совета
         try:
-            cards = draw_cards(1)
+            cards = draw_cards(3)
             card_names = [c["name"] for c in cards]
         except Exception:
             card_names = []
-
         try:
-            advice_text = await asyncio.wait_for(
-                gpt_make_advice_from_yandex_answer(
-                    yandex_answer_text=base_answer,
-                    advice_cards_list=card_names,
-                    advice_count=1,
-                ),
-                timeout=60
+            advice_text = await gpt_make_advice_from_yandex_answer(
+                yandex_answer_text=base_answer,
+                advice_cards_list=card_names,
+                advice_count=3,
             )
-        except asyncio.TimeoutError:
-            advice_text = "Совет готовится дольше обычного. Попробуйте ещё раз."
         except Exception as e:
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=has_pass))
+        # ВАЖНО: allow_three=True, чтобы кнопка не пропала при подписке
+        await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=True))
+        return
+
+    # --- Обычный совет (1) ---
+    # пытаемся списать из пакета; при подписке списания нет
+    pkg_spent = await spend_one_advice(cb.from_user.id)
+    if not pkg_spent and not has_pass:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Пакет советов (3) — 80₽", callback_data="buy:advicepack3:8000")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="nav:menu")],
+        ])
+        await _edit_text_or_caption(cb.message, "У вас нет доступных советов.\nВыберите вариант получения:", reply_markup=kb)
+        return
+
+    try:
+        cards = draw_cards(1)
+        card_names = [c["name"] for c in cards]
+    except Exception:
+        card_names = []
+
+    try:
+        advice_text = await gpt_make_advice_from_yandex_answer(
+            yandex_answer_text=base_answer,
+            advice_cards_list=card_names,
+            advice_count=1,
+        )
+    except Exception as e:
+        advice_text = f"⚠️ Не удалось получить совет: {e}"
+
+    # Кнопка расширенного совета показывается только при активной подписке
+    await _edit_text_or_caption(cb.message, advice_text, reply_markup=_advice_back_kb(allow_three=has_pass))
 
 
 @router.callback_query(F.data == "advice:back")
 async def advice_back_to_prediction(cb: CallbackQuery, state: FSMContext):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     data = await state.get_data()
     prediction = (data.get("last_prediction_text") or "").strip()
     if not prediction:
         await _edit_text_or_caption(cb.message, "Предсказание недоступно. Попробуйте сделать расклад заново.", reply_markup=main_menu_inline())
         return
+    # расширенный совет в инлайн-лимитах — только при активной подписке
     has_pass = await pass_is_active(cb.from_user.id)
     await _edit_text_or_caption(cb.message, prediction, reply_markup=advice_inline_limits(allow_one=True, allow_three=has_pass))
 
@@ -366,7 +364,7 @@ async def advice_back_to_prediction(cb: CallbackQuery, state: FSMContext):
 # ---------- свой вопрос ----------
 @router.callback_query(F.data == "menu:custom")
 async def custom_start(cb: CallbackQuery, state: FSMContext):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     await state.set_state(CustomFSM.waiting_question)
     hint = (
         "Напишите свой вопрос одним сообщением ⬇️\n\n"
@@ -393,55 +391,99 @@ async def custom_receive(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # --- тянем карты и отправляем ИХ ОТДЕЛЬНЫМ СООБЩЕНИЕМ ---
+    # Карты (именно эти имена используем в заголовках — без склонений)
     cards = draw_cards(3)
     names = _card_names(cards)
     cards_list = ", ".join(names)
-    await message.answer(f"🃏 Карты: {cards_list}")
 
-    # отдельным сообщением — индикатор работы
+    # Индикатор
     await message.answer("🔮 Делаю толкование...")
 
-    # --- генерируем предсказание ---
+    # Сразу — видео и список карт (чтобы было видно прогресс)
+    await _send_spread_media_with_caption(message, "🔮 Ваш расклад готов!")
+    await message.answer(f"🃏 Карты: {cards_list}")
+
+    # Получаем толкование под «печатает…» + таймаут
+    async def _llm():
+        return await gpt_make_prediction(
+            question=question,
+            theme="Пользовательский вопрос",
+            spread="custom",
+            cards_list=cards_list
+        )
+
+    with_text = ""
     async with typing_action(message.bot, message.chat.id):
         try:
-            prediction = await gpt_make_prediction(
-                question=question,
-                theme="Пользовательский вопрос",
-                spread="custom",
-                cards_list=cards_list
-            )
+            prediction = await asyncio.wait_for(_llm(), timeout=40)
+        except asyncio.TimeoutError:
+            prediction = ""
+            bullets = "\n".join([f"Карта: {n}\nСовет: прислушайтесь к интуиции." for n in names])
+            with_text = f"⚠️ Ответ занял слишком много времени.\n\n{bullets}"
         except Exception:
-            prediction = "⚠️ Не удалось получить толкование. Попробуйте ещё раз."
+            prediction = ""
+            with_text = "⚠️ Не удалось получить толкование. Попробуйте ещё раз."
 
+    # Рассылаем карточные блоки
+    if with_text:
+        # Фолбэк: уже сформирован простой текст, пошлём как есть
+        await message.answer(with_text)
+        itog_text = _extract_itog(with_text)
+    else:
+        blocks, itog_text = split_card_blocks_and_itog(prediction)
+        if not blocks:
+            # Если не распарсилось — одним сообщением
+            await message.answer(prediction or "⚠️ Не удалось получить толкование. Попробуйте ещё раз.")
+        else:
+            for idx, b in enumerate(blocks):
+                # Жёстко подставляем имена карт из names, чтобы не было склонений
+                title = names[idx] if idx < len(names) else b["title"]
+                text_block = f"Карта: {title}\n\n{b['body']}".strip()
+                await message.answer(text_block)
+                await asyncio.sleep(0.8)
+
+    # Итог отдельно
+    if itog_text:
+        await message.answer(f"✨ {itog_text}")
+
+    # Лог
     user = await ensure_user(message.from_user.id, message.from_user.username)
     async with SessionLocal() as s:
-        s.add(models.SpreadLog(user_id=user.id, question=question, spread="custom", cards={"cards": names}, cost=1))
+        s.add(models.SpreadLog(
+            user_id=user.id,
+            question=question,
+            spread="custom",
+            cards={"cards": names},
+            cost=1
+        ))
         await s.commit()
 
+    # Сохраняем для советов
     await state.update_data(
         user_question=question,
         last_question=question,
         last_cards=names,
         last_spread="custom",
         last_theme="Пользовательский вопрос",
-        last_itog=_extract_itog(prediction),
-        last_prediction_text=prediction,
+        last_itog=itog_text or "",
+        last_prediction_text=(with_text or prediction or ""),
     )
 
+    # Кнопки советов
     has_pass = await pass_is_active(message.from_user.id)
     kb = advice_inline_limits(allow_one=True, allow_three=has_pass)
+    await message.answer("💡 Нужны конкретные шаги? Получите совет по раскладу:", reply_markup=kb)
 
-    await message.answer(prediction, reply_markup=kb)
 
 
 
 # ---------- промокод ----------
 @router.callback_query(F.data == "menu:promo")
 async def promo_start(cb: CallbackQuery, state: FSMContext):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     await state.set_state(PromoFSM.waiting_code)
     await _edit_text_or_caption(cb.message, "Введите промокод сообщением ⬇️", reply_markup=back_to_menu_inline())
+
 
 
 @router.message(PromoFSM.waiting_code, F.text)
@@ -455,7 +497,7 @@ async def promo_redeem(message: Message, state: FSMContext):
 # ---------- профиль ----------
 @router.callback_query(F.data == "menu:profile")
 async def show_profile(cb: CallbackQuery):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     user = await ensure_user(cb.from_user.id, cb.from_user.username)
 
     balance_msgs = await get_user_balance(cb.from_user.id)
@@ -489,13 +531,13 @@ ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "8000"))  #
 
 @router.callback_query(F.data == "menu:buy")
 async def buy_menu(cb: CallbackQuery):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     await _edit_text_or_caption(cb.message, "Выберите пакет:", reply_markup=buy_inline())
 
 
 @router.callback_query(F.data.startswith("buy:"))
 async def buy_pick(cb: CallbackQuery, bot: Bot):
-    await _safe_cb_answer(cb)
+    await cb.answer()
     if not PROVIDER_TOKEN:
         await _edit_text_or_caption(cb.message, "⚠️ Платежный провайдер не настроен. Добавьте PAYMENTS_PROVIDER_TOKEN в .env", reply_markup=main_menu_inline())
         return
@@ -593,22 +635,17 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception:
             advice_card_names = []
 
-        async with typing_action(message.bot, message.chat.id):
-            try:
-                advice_text = await asyncio.wait_for(
-                    gpt_make_advice_from_yandex_answer(
-                        yandex_answer_text=yandex_answer,
-                        advice_cards_list=advice_card_names,
-                        advice_count=1,
-                    ),
-                    timeout=60
-                )
-            except asyncio.TimeoutError:
-                advice_text = "Совет готовится дольше обычного. Попробуйте ещё раз."
-            except Exception as e:
-                advice_text = f"⚠️ Не удалось получить совет: {e}"
+        try:
+            advice_text = await gpt_make_advice_from_yandex_answer(
+                yandex_answer_text=yandex_answer,
+                advice_cards_list=advice_card_names,
+                advice_count=1,
+            )
+        except Exception as e:
+            advice_text = f"⚠️ Не удалось получить совет: {e}"
 
         note = f"\nID платежа: {charge_id}" if charge_id else ""
+        # расширенный совет доступен только при подписке
         has_pass = await pass_is_active(message.from_user.id)
         await message.answer(advice_text + note, reply_markup=_advice_back_kb(allow_three=has_pass))
         return
@@ -648,20 +685,14 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception:
             card_names = []
 
-        async with typing_action(message.bot, message.chat.id):
-            try:
-                advice_text = await asyncio.wait_for(
-                    gpt_make_advice_from_yandex_answer(
-                        yandex_answer_text=yandex_answer,
-                        advice_cards_list=card_names,
-                        advice_count=1,
-                    ),
-                    timeout=60
-                )
-            except asyncio.TimeoutError:
-                advice_text = "Совет готовится дольше обычного. Попробуйте ещё раз."
-            except Exception as e:
-                advice_text = f"⚠️ Не удалось получить совет: {e}"
+        try:
+            advice_text = await gpt_make_advice_from_yandex_answer(
+                yandex_answer_text=yandex_answer,
+                advice_cards_list=card_names,
+                advice_count=1,
+            )
+        except Exception as e:
+            advice_text = f"⚠️ Не удалось получить совет: {e}"
 
         try:
             bal_adv = await get_advice_balance_by_tg_id(message.from_user.id)
@@ -669,6 +700,7 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception:
             pass
 
+        # Расширенный совет по пакету НЕ доступен — только по подписке
         has_pass = await pass_is_active(message.from_user.id)
         await message.answer(
             f"✅ Пакет советов (3) активирован.{note}\n{adv_note_bal}\n\n" + advice_text,
@@ -687,36 +719,34 @@ async def successful_payment(message: Message, state: FSMContext):
 
         note = f"\nID платежа: {charge_id}" if charge_id else ""
 
+        # Если пользователь пришёл из расширенного совета — сразу выдаём 3 карты
         if pending == 3 and yandex_answer:
             try:
                 cards = draw_cards(3)
                 card_names = [c["name"] for c in cards]
             except Exception:
                 card_names = []
-            async with typing_action(message.bot, message.chat.id):
-                try:
-                    advice_text = await asyncio.wait_for(
-                        gpt_make_advice_from_yandex_answer(
-                            yandex_answer_text=yandex_answer,
-                            advice_cards_list=card_names,
-                            advice_count=3,
-                        ),
-                        timeout=60
-                    )
-                except asyncio.TimeoutError:
-                    advice_text = "Совет готовится дольше обычного. Попробуйте ещё раз."
-                except Exception as e:
-                    advice_text = f"⚠️ Не удалось получить совет: {e}"
+            try:
+                advice_text = await gpt_make_advice_from_yandex_answer(
+                    yandex_answer_text=yandex_answer,
+                    advice_cards_list=card_names,
+                    advice_count=3,
+                )
+            except Exception as e:
+                advice_text = f"⚠️ Не удалось получить совет: {e}"
 
+            # ВАЖНО: после выдачи — кнопка расширенного остаётся (allow_three=True при активной подписке)
             await message.answer(
                 "✅ Подписка на 30 дней активирована.\n"
                 f"Доступ до: {_format_date_human(expires)}{note}\n\n"
                 + advice_text,
                 reply_markup=_advice_back_kb(allow_three=True)
             )
+            # очистим флаг
             await state.update_data(pending_advice_after_payment=None)
             return
 
+        # Обычная ветка — без немедленного совета
         await message.answer(
             "✅ Подписка на 30 дней активирована.\n"
             f"Доступ до: {_format_date_human(expires)}\n"
@@ -724,6 +754,7 @@ async def successful_payment(message: Message, state: FSMContext):
             f"{note}",
             reply_markup=main_menu_inline()
         )
+        # на всякий случай очистим флаг
         await state.update_data(pending_advice_after_payment=None)
         return
 
@@ -735,7 +766,7 @@ async def successful_payment(message: Message, state: FSMContext):
 # ---------- обратная связь ----------
 @router.callback_query(F.data == "menu:feedback")
 async def feedback_start(cb: CallbackQuery, state: FSMContext):
-    await _safe_cb_answer(cb)
+    await cb.answer()
 
     dl_param = f"fb_{cb.from_user.id}"
     if ADMIN_USERNAME:
