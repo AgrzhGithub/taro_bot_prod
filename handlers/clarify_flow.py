@@ -637,7 +637,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
         await s.commit()
 
     # ---------- шапка ----------
-    header = f"{dir_title} — {scenario['title']}\nКарты: {', '.join(card_names)}"
+    header = f"🔮 Ваш расклад готов! \n\n {dir_title} — {scenario['title']}\n\n🃏 Карты: {', '.join(card_names)}"
     combined_parts: List[str] = [f"{dir_title} — {scenario['title']}", f"Карты: {', '.join(card_names)}", ""]
 
     # Интро (если есть медиа)
@@ -662,10 +662,10 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                 a0 = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
         # ВАЖНО: «Карта: ...» — отдельным сообщением
-        first_block = f"Карта: {c0}\n\n{a0}"
+        first_block = f"⭐️ Карта: {c0}\n\n{a0}"
         await cb.message.answer(first_block, parse_mode=None)
 
-        combined_parts += [f"Карта: {c0}\n{a0}", ""]
+        combined_parts += [f"⭐️ Карта: {c0}\n{a0}", ""]
         start_i = 1
 
     # ---------- остальные пункты ----------
@@ -685,9 +685,9 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
             except Exception:
                 a = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
-        block = f"Карта: {c}\n\n{a}"
+        block = f"⭐️ Карта: {c}\n\n{a}"
         await cb.message.answer(block, parse_mode=None)
-        combined_parts += [f"Карта: {c}\n{a}", ""]
+        combined_parts += [f"⭐️ Карта: {c}\n{a}", ""]
 
     # ---------- общий итог ----------
     async with typing_action(cb.message.bot, cb.message.chat.id):
@@ -695,7 +695,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
             summary_raw = await asyncio.wait_for(
                 gpt_make_prediction(
                     question=(
-                        "Сформулируй магический, вдохновляющий итог расклада в 3–6 предложениях. "
+                        "Сформулируй магический, вдохновляющий итог расклада в 1 предложении. "
                         "Пиши образно и осмысленно, как будто это интуитивное послание судьбы. "
                         "Не перечисляй карты и пункты, не упоминай их названия. "
                         "Избегай советов и прямых указаний, но передай внутренний смысл, настроение и энергию расклада. "
