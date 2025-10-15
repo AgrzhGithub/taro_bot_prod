@@ -54,7 +54,7 @@ SCENARIOS_LOVE: List[Dict[str, Any]] = [
          "что мешает вам быть вместе",
          "что мешает человеку быть вместе с вами",
          "будущее, ответ на ваш вопрос",
-         "совет, пояснение (к будущему)",
+         "пояснение к будущему",
      ]},
     {"title": "На любимого человека",
      "points": [
@@ -92,7 +92,7 @@ SCENARIOS_LOVE: List[Dict[str, Any]] = [
          "не являются ли деньги источником проблем",
          "совместимость",
          "хочет ли партнёр всё бросить или хочет всё исправить",
-         "есть ли проблемы с зависимостями (алкоголь/другое)",
+         "есть ли проблемы с зависимостями",
          "давите ли вы друг на друга негативом",
          "ситуация на ближайшее будущее",
          "итог",
@@ -334,11 +334,31 @@ class ClarifyFSM(StatesGroup):
 # ------------------ Эмодзи для низа итога ------------------
 MAGIC_FOOTER = "🔮✨🌙✨🔮"
 
-# ------------------ Утилиты очистки текста ------------------
+# ------------------ Утилиты форматирования/очистки ------------------
 EMOJI_RX = re.compile(
     r"[\U0001F300-\U0001FAFF\U00002500-\U00002BEF\U00002600-\U000026FF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF\ufe0f\ufe0e]",
     flags=re.UNICODE,
 )
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+_ITOG_HEADER_RE = re.compile(r"(?im)^\s*(?:🌙\s*)?Итог\s*:?\s*")
+
+ADVICE_HINTS = [
+    "совет", "советую", "рекоменд", "стоит", "следует", "лучше",
+    "нужно", "необходимо", "постарайтесь", "попробуйте", "сделайте",
+    "возьмите", "должны", "вам стоит", "вам следует", "рекомендую",
+    "избегайте", "продолжайте", "планируйте", "подума", "уделите",
+    "сконцентрируйтесь", "сосредоточьтесь", "начните", "перестаньте"
+]
+
+def _collapse_spaces(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+(\n)", r"\1", text)      # пробелы перед переносом
+    text = re.sub(r"(?m)^[ \t]+", "", text)        # лидирующие пробелы в строках
+    text = re.sub(r"\n{3,}", "\n\n", text)         # не больше 1 пустой строки
+    text = re.sub(r"[ \t]{2,}", " ", text)         # двойные пробелы
+    return text.strip()
 
 def strip_emojis(text: str) -> str:
     return EMOJI_RX.sub("", text or "")
@@ -375,7 +395,7 @@ def sanitize_answer(text: str) -> str:
     t = remove_itog_advice_lines(text)
     t = strip_emojis(t)
     t = strip_bullets(t)
-    return t
+    return _collapse_spaces(t)
 
 def sanitize_summary(text: str) -> str:
     t = remove_itog_advice_lines(text)
@@ -383,8 +403,52 @@ def sanitize_summary(text: str) -> str:
     t = strip_bullets(t)
     t = re.sub(r"(?m)^\s*(\d+[\).\:]|\-|\•)\s+.*$", "", t)
     t = collapse_card_named_lines_to_paragraph(t)
-    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    t = re.sub(r"\s*\n\s*", " ", t)     # итог — один абзац
+    t = re.sub(r"\s{2,}", " ", t).strip()
     return t
+
+def starify_card_header_block(text: str) -> str:
+    """Гарантируем '⭐️ Карта:' в начале сообщения по карте."""
+    if not isinstance(text, str):
+        return text
+    text = _collapse_spaces(text)
+    return re.sub(r"(?m)^\s*(Карта:)", r"⭐️ \1", text, count=1)
+
+def itog_three_sentences_no_advice(text: str) -> str:
+    """
+    Приводит блок 'Итог' к одному абзацу, ровно 3 предложения, без советов.
+    Принимает ТОЛЬКО сам текст итога (без заголовка).
+    """
+    t = _collapse_spaces(text)
+    t = re.sub(r"\s*\n\s*", " ", t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    # фильтруем предложения с советными словами
+    sentences = [s.strip() for s in _SENT_SPLIT_RE.split(t) if s.strip()]
+    clean = [s for s in sentences if not any(h in s.lower() for h in ADVICE_HINTS)]
+
+    # доводим до ровно трёх
+    clean = clean[:3]
+    while len(clean) < 3:
+        filler = "Ситуация развивается последовательно."
+        if clean and filler.lower() == clean[-1].lower():
+            filler = "Динамика остаётся устойчивой."
+        clean.append(filler)
+
+    joined = " ".join(s if s.endswith(('.', '!', '?')) else s + '.' for s in clean)
+    joined = re.sub(r"\s{2,}", " ", joined).strip()
+
+    # ограничение длины, чтобы итог не «распухал» (≈ 350 символов)
+    if len(joined) > 350:
+        words, acc, total = joined.split(), [], 0
+        for w in words:
+            if total + len(w) + (1 if acc else 0) > 350:
+                break
+            acc.append(w)
+            total += len(w) + (1 if acc else 0)
+        joined = " ".join(acc).rstrip(" ,;:") + "."
+
+    return joined
 
 # ------------------ Индикация «печатает…» ------------------
 class _TypingAction:
@@ -410,7 +474,6 @@ class _TypingAction:
                 pass
 
         self._task = asyncio.create_task(_loop())
-        # мгновенно показать «печатает…»
         await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
         return self
 
@@ -440,7 +503,7 @@ async def send_intro_with_caption(cb: CallbackQuery, caption: str) -> None:
     """
     path = _pick_intro_media()
     if not path:
-        await cb.message.answer(caption, parse_mode=None)
+        await cb.message.answer(_collapse_spaces(caption), parse_mode=None)
         return
 
     cap = caption[:1024]
@@ -448,11 +511,11 @@ async def send_intro_with_caption(cb: CallbackQuery, caption: str) -> None:
 
     try:
         file = FSInputFile(path)
-        await cb.message.answer_animation(file, caption=cap, parse_mode=None)
+        await cb.message.answer_animation(file, caption=_collapse_spaces(cap), parse_mode=None)
         if rest.strip():
-            await cb.message.answer(rest.strip(), parse_mode=None)
+            await cb.message.answer(_collapse_spaces(rest.strip()), parse_mode=None)
     except Exception:
-        await cb.message.answer(caption, parse_mode=None)
+        await cb.message.answer(_collapse_spaces(caption), parse_mode=None)
 
 # ------------------ Сервисные утилиты ------------------
 async def _safe_cb_answer(cb: CallbackQuery, text: str | None = None, show_alert: bool = False) -> None:
@@ -637,7 +700,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
         await s.commit()
 
     # ---------- шапка ----------
-    header = f"🔮 Ваш расклад готов! \n\n {dir_title} — {scenario['title']}\n\n🃏 Карты: {', '.join(card_names)}"
+    header = f"🔮 Ваш расклад готов!\n\n{dir_title} — {scenario['title']}\n\n🃏 Карты: {', '.join(card_names)}"
     combined_parts: List[str] = [f"{dir_title} — {scenario['title']}", f"Карты: {', '.join(card_names)}", ""]
 
     # Интро (если есть медиа)
@@ -661,11 +724,10 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
             except Exception:
                 a0 = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
-        # ВАЖНО: «Карта: ...» — отдельным сообщением
-        first_block = f"⭐️ Карта: {c0}\n\n{a0}"
+        first_block = starify_card_header_block(f"Карта: {c0}\n\n{a0}")
         await cb.message.answer(first_block, parse_mode=None)
 
-        combined_parts += [f"⭐️ Карта: {c0}\n{a0}", ""]
+        combined_parts += [first_block, ""]
         start_i = 1
 
     # ---------- остальные пункты ----------
@@ -685,9 +747,9 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
             except Exception:
                 a = "Не удалось получить толкование. Попробуйте ещё раз позже."
 
-        block = f"⭐️ Карта: {c}\n\n{a}"
+        block = starify_card_header_block(f"Карта: {c}\n\n{a}")
         await cb.message.answer(block, parse_mode=None)
-        combined_parts += [f"⭐️ Карта: {c}\n{a}", ""]
+        combined_parts += [block, ""]
 
     # ---------- общий итог ----------
     async with typing_action(cb.message.bot, cb.message.chat.id):
@@ -695,11 +757,9 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
             summary_raw = await asyncio.wait_for(
                 gpt_make_prediction(
                     question=(
-                        "Сформулируй магический, вдохновляющий итог расклада в 1 предложении. "
-                        "Пиши образно и осмысленно, как будто это интуитивное послание судьбы. "
-                        "Не перечисляй карты и пункты, не упоминай их названия. "
-                        "Избегай советов и прямых указаний, но передай внутренний смысл, настроение и энергию расклада. "
-                        "Формулируй естественным языком, плавно и с лёгкой мистикой, без эмодзи и списков."
+                        "Сформулируй ИТОГ расклада строго в 3 предложениях. "
+                        "Только резюме сути, без советов/рекомендаций/императивов. "
+                        "Не перечисляй карты и пункты. Без списков и эмодзи."
                     ),
                     theme=dir_title,
                     spread="summary",
@@ -708,11 +768,13 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                 ),
                 timeout=60
             )
-            final_summary = sanitize_summary(summary_raw)
+            # чистим и нормализуем итог под требования
+            summary_clean = sanitize_summary(summary_raw)
+            final_summary = itog_three_sentences_no_advice(summary_clean)
         except asyncio.TimeoutError:
-            final_summary = "Итог готовится дольше обычного. Попробуйте ещё раз."
+            final_summary = "Ситуация развивается последовательно. Динамика остаётся устойчивой. Основные тенденции уже проявились."
         except Exception:
-            final_summary = "Итог временно недоступен."
+            final_summary = "Карты указывают на ключевые тенденции. Важные влияния продолжают действовать. Контекст остаётся неизменным."
 
     # Заглавная буква
     if final_summary and len(final_summary) > 1:

@@ -750,7 +750,7 @@ async def successful_payment(message: Message, state: FSMContext):
         await message.answer(
             "✅ Подписка на 30 дней активирована.\n"
             f"Доступ до: {_format_date_human(expires)}\n"
-            f"Теперь можно получать обычный и расширенный совет."
+            f"Теперь можно пользоваться всем доступным функционалом."
             f"{note}",
             reply_markup=main_menu_inline()
         )
