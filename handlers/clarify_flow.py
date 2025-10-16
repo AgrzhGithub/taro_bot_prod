@@ -405,7 +405,10 @@ def sanitize_summary(text: str) -> str:
     t = collapse_card_named_lines_to_paragraph(t)
     t = re.sub(r"\s*\n\s*", " ", t)     # итог — один абзац
     t = re.sub(r"\s{2,}", " ", t).strip()
-    return t
+    # убрать возможные упоминания карт из итога
+    t = re.sub(r"(?i)\b(туз|двойка|тройка|четвёрка|пятёрка|шестёрка|семёрка|восьмёрка|девятка|десятка|паж|рыцарь|королева|король|шут|маг|жрица|императрица|император|жрец|влюблённые|колесница|сила|отшельник|колесо фортуны|справедливость|повешенный|смерть|умеренность|дьявол|башня|звезда|луна|солнце|суд|мир)\b.*?(жезл|чаш|кубк|меч|пентакл)", "", t)
+    t = re.sub(r"\(\s*перев[ёе]рнут[аяы].*?\)", "", t)
+    return t.strip()
 
 def starify_card_header_block(text: str) -> str:
     """Гарантируем '⭐️ Карта:' в начале сообщения по карте."""
@@ -438,7 +441,7 @@ def itog_three_sentences_no_advice(text: str) -> str:
     joined = " ".join(s if s.endswith(('.', '!', '?')) else s + '.' for s in clean)
     joined = re.sub(r"\s{2,}", " ", joined).strip()
 
-    # ограничение длины, чтобы итог не «распухал» (≈ 350 символов)
+    # ограничение длины (≈ 350 символов)
     if len(joined) > 350:
         words, acc, total = joined.split(), [], 0
         for w in words:
@@ -449,6 +452,51 @@ def itog_three_sentences_no_advice(text: str) -> str:
         joined = " ".join(acc).rstrip(" ,;:") + "."
 
     return joined
+
+def drop_leading_card_header(text: str, card_name: str) -> str:
+    """
+    Убирает в начале толкования строки вида:
+    • "Карта: …"
+    • "{Имя карты}" или "{Имя карты} (перевёрнутая)" с/без тире/двоеточия
+    • Вариант с эмодзи перед "Карта:"
+    """
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+
+    # 1) Любая шапка "Карта: …" (с эмодзи или без)
+    t = re.sub(r'^(?:⭐️\s*)?Карта:\s*[^\n]*\n+', '', t, flags=re.IGNORECASE)
+
+    # 2) Повтор имени карты в начале (с "(перевёрнутая)" опционально)
+    card_rx = rf'^\s*{re.escape(card_name)}(?:\s*\((?:перев[ёе]рнут[аяы]|reversed)[^)]*\))?\s*(?:[—\-:]\s*)?'
+    t = re.sub(card_rx, '', t, flags=re.IGNORECASE)
+
+    # 3) Имя карты + перенос строки
+    t = re.sub(rf'^\s*{re.escape(card_name)}(?:\s*\([^)]+\))?\s*\n+', '', t, flags=re.IGNORECASE)
+
+    return t.strip()
+
+def enforce_second_person(text: str) -> str:
+    """
+    Приводит формулировку к 2-му лицу (Вы) на уровне мягких правок.
+    Основной упор — на промпт для LLM; функция страхует отдельные случаи.
+    """
+    if not isinstance(text, str):
+        return text
+    t = _collapse_spaces(text)
+
+    # Если начало абзаца — "Человек/Он/Она", заменим на "Вы"
+    t = re.sub(r'(?im)^\s*(человек|он|она)\b', "Вы", t, count=1)
+
+    # "вы" -> "Вы" после точки/начала строки
+    t = re.sub(r'(?m)(^|\.\s+)(вы)\b', r'\1Вы', t)
+
+    # Иногда встречается "Человек" в начале след. предложения
+    t = re.sub(r'(?m)(^|\.\s+)Человек\b', r'\1Вы', t)
+
+    # Удалить редкие ссылки на «задающий» и т.п.
+    t = re.sub(r'(?i)\bзадающ(ий|его|ему|ем|им)\b', "Вы", t)
+    return t.strip()
 
 # ------------------ Индикация «печатает…» ------------------
 class _TypingAction:
@@ -719,6 +767,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                     timeout=60
                 )
                 a0 = sanitize_answer(raw0)
+                a0 = drop_leading_card_header(a0, c0)
             except asyncio.TimeoutError:
                 a0 = "Толкование готовится дольше обычного. Попробуйте ещё раз."
             except Exception:
@@ -742,6 +791,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                     timeout=60
                 )
                 a = sanitize_answer(raw)
+                a = drop_leading_card_header(a, c)
             except asyncio.TimeoutError:
                 a = "Толкование готовится дольше обычного. Попробуйте ещё раз."
             except Exception:
@@ -754,27 +804,49 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
     # ---------- общий итог ----------
     async with typing_action(cb.message.bot, cb.message.chat.id):
         try:
+            # Собираем ТОЛЬКО тексты толкований без заголовков "Карта: ..."
+            card_texts_only: List[str] = []
+            for block in combined_parts:
+                cleaned = re.sub(r"(?im)^⭐️?\s*Карта:\s*[^\n]*\n+", "", block).strip()
+                if cleaned:
+                    card_texts_only.append(cleaned)
+            full_context = "\n".join(card_texts_only)
+
             summary_raw = await asyncio.wait_for(
                 gpt_make_prediction(
                     question=(
-                        "Сформулируй ИТОГ расклада строго в 3 предложениях. "
-                        "Только резюме сути, без советов/рекомендаций/императивов. "
-                        "Не перечисляй карты и пункты. Без списков и эмодзи."
+                        "Сформулируй общий ИТОГ расклада строго в 3 предложениях. "
+                        "Проанализируй весь расклад целиком по смыслу. "
+                        "Не упоминай названия карт и не перечисляй пункты. "
+                        "Пиши от второго лица («Вы»), обращаясь к задающему вопрос. "
+                        "Избегай третьего лица («он», «она», «человек»). "
+                        "Без советов/рекомендаций, без списков и эмодзи."
                     ),
                     theme=dir_title,
                     spread="summary",
                     cards_list=", ".join(card_names),
-                    scenario_ctx=scenario["title"],
+                    scenario_ctx=f"{scenario['title']}\n\n{full_context}",
                 ),
-                timeout=60
+                timeout=90
             )
+
             # чистим и нормализуем итог под требования
             summary_clean = sanitize_summary(summary_raw)
             final_summary = itog_three_sentences_no_advice(summary_clean)
+            final_summary = enforce_second_person(final_summary)
+
         except asyncio.TimeoutError:
-            final_summary = "Ситуация развивается последовательно. Динамика остаётся устойчивой. Основные тенденции уже проявились."
+            final_summary = (
+                "Ситуация развивается последовательно. "
+                "Динамика остаётся устойчивой. "
+                "Основные тенденции уже проявились."
+            )
         except Exception:
-            final_summary = "Карты указывают на ключевые тенденции. Важные влияния продолжают действовать. Контекст остаётся неизменным."
+            final_summary = (
+                "Карты указывают на ключевые тенденции. "
+                "Важные влияния продолжают действовать. "
+                "Контекст остаётся неизменным."
+            )
 
     # Заглавная буква
     if final_summary and len(final_summary) > 1:

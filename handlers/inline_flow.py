@@ -400,8 +400,8 @@ async def custom_receive(message: Message, state: FSMContext):
     await message.answer("🔮 Делаю толкование...")
 
     # Сразу — видео и список карт (чтобы было видно прогресс)
-    await _send_spread_media_with_caption(message, "🔮 Ваш расклад готов!")
-    await message.answer(f"🔮 Ваш расклад готов! \n\n 🃏 Карты: {cards_list}")
+    await _send_spread_media_with_caption(message, f"🔮 Ваш расклад готов!\n\n 🃏 Карты: {cards_list}")
+    # await message.answer(f"🔮 Ваш расклад готов! \n\n 🃏 Карты: {cards_list}")
 
     # Получаем толкование под «печатает…» + таймаут
     async def _llm():
