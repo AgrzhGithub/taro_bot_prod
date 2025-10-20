@@ -436,10 +436,19 @@ async def send_card_of_day(bot, chat_id: int):
         interpretation = f"Ваша карта дня: {name}.\n(Толкование временно недоступно.)"
 
     # Небольшая чистка текста и пробел перед «Итог:»
+    # Небольшая чистка текста
+# Небольшая чистка текста
     interpretation_clean = re.sub(r'^\s*\d+[)\.]\s*', '', interpretation, flags=re.MULTILINE)
-    # interpretation_clean = interpretation_clean.replace("Итог:", "\n\nИтог:")
 
-    caption = f"🗓 Карта дня\n\n🃏 {name}\n\n{interpretation_clean}"
+    # Находим "Итог" и делаем перенос строки перед его содержанием, убирая само слово
+    interpretation_clean = re.sub(
+        r'(?mi)\n?\s*(?:[🌙⭐️🔮✨]*\s*)?Итог\s*:?\s*',  # убираем слово "Итог" и возможные эмодзи
+        '\n\n',  # начинаем новый абзац
+        interpretation_clean
+    ).strip()
+
+
+    caption = f"🗓 Карта дня\n\n{interpretation_clean}"
 
     img_path = find_card_image_path(name)
     if img_path:
