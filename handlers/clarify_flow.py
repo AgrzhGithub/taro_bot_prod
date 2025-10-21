@@ -456,22 +456,36 @@ def itog_three_sentences_no_advice(text: str) -> str:
 
     return joined
 
-# ---------- НОВОЕ: «умные» варианты имён карт для удаления дублей ----------
-def _card_name_variants_regex(card_name: str) -> str:
+# ---------- НОВОЕ: нормализация имени карты и устойчивое удаление дублей ----------
+def normalize_card_base(name: str) -> str:
     """
-    Строит regex, совпадающий с именем карты и частыми падежными вариантами мастей,
-    чтобы убирать дубли вида «Туз Жезлов (перевёрнутая)» после «Карта: Туз Жезлы (перевёрнутая)».
+    Возвращает «базовое» имя карты без приписок про перевёрнутость и прочих скобок.
+    Пример: 'Туз Жезлы (перевёрнутая)' -> 'Туз Жезлы'
     """
-    if not isinstance(card_name, str) or not card_name.strip():
-        return re.escape(card_name or "")
+    if not isinstance(name, str):
+        return name or ""
+    t = name.strip()
+    # убрать (перевёрнутая) / (reversed) и любые скобочные хвосты в конце
+    t = re.sub(r"\s*\((?:перев[ёе]рнут\w*|reversed)[^)]*\)\s*$", "", t, flags=re.IGNORECASE)
+    # иногда встречается '— перевёрнутая' без скобок
+    t = re.sub(r"\s*[—\-:]\s*перев[ёе]рнут\w*\s*$", "", t, flags=re.IGNORECASE)
+    return t.strip()
 
-    words = card_name.strip().split()
+def _card_name_variants_regex(card_name_base: str) -> str:
+    """
+    Строит regex по БАЗОВОМУ имени карты (без '(перевёрнутая)') и допускает частые падежи мастей.
+    """
+    if not isinstance(card_name_base, str) or not card_name_base.strip():
+        return re.escape(card_name_base or "")
+
+    words = card_name_base.strip().split()
     suit_map = {
         "жезлы": r"Жезл(?:ы|ов)",
         "кубки": r"Кубк(?:и|ов)",
         "чаши": r"Чаш(?:и|)",
         "мечи": r"Меч(?:и|ей)",
         "пентакли": r"Пентакл(?:и|ей)",
+        "пентаклей": r"Пентакл(?:и|ей)",
     }
 
     def suit_pattern(token: str) -> str:
@@ -487,24 +501,33 @@ def _card_name_variants_regex(card_name: str) -> str:
 
 def drop_leading_card_header(text: str, card_name: str) -> str:
     """
-    Убирает в начале толкования:
-    • строки вида "Карта: …"
-    • повтор имени карты (в т.ч. падежные варианты мастей) с/без "(перевёрнутая)" и тире/двоеточия
-    • лишний перенос после удаления
+    Убирает дубли в начале толкования:
+    - 'Карта: …'
+    - повтор имени карты (с учетом падежей мастей),
+      с/без '(перевёрнутая)', с/без '—', ':'
+    - случай, когда текст начинается как 'Туз Жезлов в перевёрнутом положении …' (без переноса)
     """
     if not isinstance(text, str):
         return text
+
     t = text.strip()
 
-    # 1) Любая шапка "Карта: …" (с эмодзи или без)
+    # 0) Сносим любую 'Карта: ...' шапку в начале блока
     t = re.sub(r'^(?:[⭐️🃏]\s*)?Карта:\s*[^\n]*\n+', '', t, flags=re.IGNORECASE)
 
-    # 2) Повтор имени карты (включая падежные варианты мастей)
-    name_pat = _card_name_variants_regex(card_name)
-    repeat_rx = rf'^(?:{name_pat})(?:\s*\((?:перев[ёе]рнут\w*|reversed)[^)]*\))?\s*(?:[—\-:]\s*)?(?:\n+|$)'
-    t = re.sub(repeat_rx, '', t, flags=re.IGNORECASE)
+    # 1) Готовим базовое имя карты (без '(перевёрнутая)')
+    base = normalize_card_base(card_name)
+    name_pat = _card_name_variants_regex(base)
 
-    # 3) Если осталась пустая первая строка/двойной перенос — схлопнем
+    # 2) Вариант с отдельной строкой-заголовком
+    repeat_line_rx = rf'^(?:{name_pat})(?:\s*\((?:перев[ёе]рнут\w*|reversed)[^)]*\))?\s*(?:[—\-:]\s*)?(?:\n+|$)'
+    t = re.sub(repeat_line_rx, '', t, flags=re.IGNORECASE)
+
+    # 3) Вариант без переноса: 'Туз Жезлов (перевёрнутая) ...' или 'Туз Жезлов в перевёрнутом положении ...'
+    repeat_inline_rx = rf'^(?:{name_pat})(?:\s*\((?:перев[ёе]рнут\w*|reversed)[^)]*\))?(?:\s+в\s+перев[ёе]рнут\w*\s+положени[ие])?\s*(?:[—\-:]\s*)?'
+    t = re.sub(repeat_inline_rx, '', t, count=1, flags=re.IGNORECASE)
+
+    # 4) Уберём пустые начала/двойные переносы
     t = re.sub(r'^\s*\n+', '', t)
 
     return t.strip()
@@ -784,6 +807,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
     start_i = 0
     if points:
         c0 = card_names[0] if card_names else "—"
+        c0_base = normalize_card_base(c0)
         async with typing_action(cb.message.bot, cb.message.chat.id):
             try:
                 raw0 = await asyncio.wait_for(
@@ -793,7 +817,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                     timeout=60
                 )
                 a0 = sanitize_answer(raw0)
-                a0 = drop_leading_card_header(a0, c0)
+                a0 = drop_leading_card_header(a0, c0_base)
             except asyncio.TimeoutError:
                 a0 = "Толкование готовится дольше обычного. Попробуйте ещё раз."
             except Exception:
@@ -808,6 +832,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
     # ---------- остальные пункты ----------
     for i in range(start_i, len(points)):
         c = card_names[i] if i < len(card_names) else "—"
+        c_base = normalize_card_base(c)
         async with typing_action(cb.message.bot, cb.message.chat.id):
             try:
                 raw = await asyncio.wait_for(
@@ -817,7 +842,7 @@ async def scenario_chosen(cb: CallbackQuery, state: FSMContext):
                     timeout=60
                 )
                 a = sanitize_answer(raw)
-                a = drop_leading_card_header(a, c)
+                a = drop_leading_card_header(a, c_base)
             except asyncio.TimeoutError:
                 a = "Толкование готовится дольше обычного. Попробуйте ещё раз."
             except Exception:
