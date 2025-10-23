@@ -13,7 +13,7 @@ async def create_purchase(*, tg_id: int, user_id: int, credits: int, amount: int
             user_id=user_id, tg_id=tg_id, credits=credits,
             amount=amount, currency=currency, payload=payload,
             provider=provider, provider_charge_id=provider_charge_id,
-            status="paid", meta=meta or {}
+            status="pending", meta=meta or {}
         )
         s.add(p)
         await s.commit()

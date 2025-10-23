@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramBadRequest
 from typing import List
 import os
 import re
+import json
 import asyncio
 from datetime import datetime, date
 
@@ -37,11 +38,15 @@ from services.billing import (
     pluralize_advices,
 )
 from handlers.daily_card import _send_daily_media_with_caption, _send_spread_media_with_caption
-from services.payments import create_purchase, mark_purchase_credited
+# --- ДОБАВЬ вверху файла рядом с существующим импортом payments ---
+from services.payments import create_purchase, mark_purchase_credited, get_purchase_by_charge
+
 from db import SessionLocal, models
 
 router = Router()
 
+TAX_SYSTEM_CODE = int(os.getenv("TAX_SYSTEM_CODE", "2"))
+VAT_CODE = int(os.getenv("VAT_CODE", "1"))
 
 # ---------- FSM ----------
 class PromoFSM(StatesGroup):
@@ -531,6 +536,14 @@ PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
 CURRENCY = os.getenv("CURRENCY", "RUB")
 ADVICE_ONE_PRICE_KOPECKS = int(os.getenv("ADVICE_ONE_PRICE_KOPECKS", "8000"))  # 80₽ по умолчанию
 
+if not PROVIDER_TOKEN:
+    raise RuntimeError("PAYMENTS_PROVIDER_TOKEN не задан")
+
+# жёстко отлавливаем тестовый токен
+if ":TEST:" in PROVIDER_TOKEN:
+    raise RuntimeError("Сейчас используется TEST provider token. Поставь LIVE токен из BotFather в .env")
+
+
 @router.callback_query(F.data == "menu:buy")
 async def buy_menu(cb: CallbackQuery):
     await cb.answer()
@@ -572,15 +585,37 @@ async def buy_pick(cb: CallbackQuery, bot: Bot):
         await cb.message.answer("Неизвестный тип покупки.", reply_markup=main_menu_inline())
         return
 
+    # --- провайдер-данные для чека (Telegram передаст в YooKassa) ---
+    provider_data = json.dumps({
+        "receipt": {
+            "items": [{
+                "description": title[:128],
+                "quantity": "1.00",
+                "amount": {"value": f"{amount/100:.2f}", "currency": "RUB"},  # amount у тебя в копейках
+                "vat_code": VAT_CODE,
+                "payment_mode": "full_prepayment",   # для услуг обычно так
+                "payment_subject": "service"
+            }],
+            "tax_system_code": TAX_SYSTEM_CODE
+        }
+    }, ensure_ascii=False)
+
     await bot.send_invoice(
         chat_id=cb.message.chat.id,
         title=title,
         description=description,
-        payload=payload,
-        provider_token=PROVIDER_TOKEN,
-        currency=CURRENCY,
-        prices=[LabeledPrice(label=title, amount=amount)],
+        payload=payload,                           # вернётся в successful_payment.invoice_payload
+        provider_token=PROVIDER_TOKEN,             # ДОЛЖЕН быть LIVE
+        currency=CURRENCY,                         # RUB
+        prices=[LabeledPrice(label=title, amount=amount)],  # amount в копейках (int)
+        provider_data=provider_data,               # <<< чек
+        need_email=True,                           # попросим email у пользователя
+        send_email_to_provider=True,               # Telegram передаст email в YooKassa
+        # при необходимости можно включить телефон:
+        # need_phone_number=True,
+        # send_phone_number_to_provider=True,
     )
+
 
 
 @router.pre_checkout_query()
@@ -588,23 +623,39 @@ async def pre_checkout(pre: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre.id, ok=True)
 
 
+# --- ЗАМЕНИ полностью обработчик successful_payment ---
 @router.message(F.successful_payment)
 async def successful_payment(message: Message, state: FSMContext):
     """
     После оплаты:
+    • credits_X — зачисляем X сообщений
     • advice1 — сразу выдаём обычный совет
-    • advicepack3 — сразу выдаём обычный совет (если есть предсказание)
-    • pass30 — если был флаг pending_advice_after_payment=3 и есть предсказание — выдаём РАСШИРЕННЫЙ совет сразу
+    • advicepack3 — активируем пакет советов (3) и при наличии расклада выдаём 1 совет
+    • pass30 — активируем подписку; если ждали расширенный совет, выдаём 3 карты сразу
     """
     sp = message.successful_payment
-    payload = sp.invoice_payload or ""
+    payload = (sp.invoice_payload or "").strip()
     currency = (sp.currency or CURRENCY).strip()
     total_amount = int(sp.total_amount or 0)
 
+    # ID транзакции у провайдера (ЮKassa) — сохраняем/показываем пользователю
     charge_id = getattr(sp, "provider_payment_charge_id", None) or getattr(sp, "telegram_payment_charge_id", None)
+    note = f"\nID платежа: {charge_id}" if charge_id else ""
+
+    # Антидубль: если Telegram внезапно повторит webhook — не зачислять повторно
+    if charge_id:
+        try:
+            existed = await get_purchase_by_charge(charge_id)
+            if existed and getattr(existed, "status", "") == "credited":
+                await message.answer(f"✅ Оплата уже учтена ранее.{note}", reply_markup=main_menu_inline())
+                return
+        except Exception:
+            # в сомнительном случае продолжим обработку как обычно
+            pass
 
     user = await ensure_user(message.from_user.id, message.from_user.username)
 
+    # Создаём запись о покупке со статусом pending
     purchase_id = await create_purchase(
         tg_id=message.from_user.id,
         user_id=user.id,
@@ -617,6 +668,38 @@ async def successful_payment(message: Message, state: FSMContext):
         meta={"raw": sp.model_dump()},
     )
 
+    # ===== Новая ветка: ПОКУПКА СООБЩЕНИЙ (credits) =====
+    if payload.startswith("credits_"):
+        # ожидаемый формат: credits_{qty}_{amountKopecks}
+        parts = payload.split("_")
+        try:
+            credits_qty = int(parts[1])
+        except Exception:
+            credits_qty = 0
+
+        if credits_qty <= 0:
+            await message.answer("⚠️ Не удалось определить объём пакета сообщений. Напишите в поддержку.", reply_markup=main_menu_inline())
+            return
+
+        # зачисляем и помечаем покупку как credited
+        try:
+            await grant_credits(user.id, credits_qty, reason="credits_purchase")
+            await mark_purchase_credited(purchase_id)
+        except Exception as e:
+            await message.answer(f"⚠️ Ошибка зачисления сообщений: {e}", reply_markup=main_menu_inline())
+            return
+
+        # показываем текущий баланс
+        try:
+            balance_msgs = await get_user_balance(message.from_user.id)
+            bal_line = f"Теперь доступно сообщений: {balance_msgs}"
+        except Exception:
+            bal_line = ""
+
+        await message.answer(f"✅ {credits_qty} сообщений зачислены.{note}\n{bal_line}", reply_markup=main_menu_inline())
+        return
+    # ===== конец новой ветки credits =====
+
     # --- обычный разовый совет ---
     if payload.startswith("advice1_"):
         await mark_purchase_credited(purchase_id)
@@ -626,7 +709,7 @@ async def successful_payment(message: Message, state: FSMContext):
 
         if not yandex_answer:
             await message.answer(
-                "Оплата принята. Чтобы я дал совет — сначала сделайте расклад или задайте вопрос.",
+                "Оплата принята. Чтобы я дал совет — сначала сделайте расклад или задайте вопрос." + note,
                 reply_markup=main_menu_inline()
             )
             return
@@ -646,8 +729,6 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception as e:
             advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-        note = f"\nID платежа: {charge_id}" if charge_id else ""
-        # расширенный совет доступен только при подписке
         has_pass = await pass_is_active(message.from_user.id)
         await message.answer(advice_text + note, reply_markup=_advice_back_kb(allow_three=has_pass))
         return
@@ -670,10 +751,9 @@ async def successful_payment(message: Message, state: FSMContext):
         data = await state.get_data()
         yandex_answer = (data.get("last_prediction_text") or "").strip()
 
-        note = f"\nID платежа: {charge_id}" if charge_id else ""
         if not yandex_answer:
             await message.answer(
-                f"✅ Пакет советов (3) активирован.\n{adv_note_bal}{note}\n\n"
+                f"✅ Пакет советов (3) активирован.{note}\n{adv_note_bal}\n\n"
                 "Сделайте расклад или задайте вопрос — и сразу сможете получить совет.",
                 reply_markup=main_menu_inline()
             )
@@ -702,7 +782,6 @@ async def successful_payment(message: Message, state: FSMContext):
         except Exception:
             pass
 
-        # Расширенный совет по пакету НЕ доступен — только по подписке
         has_pass = await pass_is_active(message.from_user.id)
         await message.answer(
             f"✅ Пакет советов (3) активирован.{note}\n{adv_note_bal}\n\n" + advice_text,
@@ -719,9 +798,6 @@ async def successful_payment(message: Message, state: FSMContext):
         pending = data.get("pending_advice_after_payment")
         yandex_answer = (data.get("last_prediction_text") or "").strip()
 
-        note = f"\nID платежа: {charge_id}" if charge_id else ""
-
-        # Если пользователь пришёл из расширенного совета — сразу выдаём 3 карты
         if pending == 3 and yandex_answer:
             try:
                 cards = draw_cards(3)
@@ -737,31 +813,25 @@ async def successful_payment(message: Message, state: FSMContext):
             except Exception as e:
                 advice_text = f"⚠️ Не удалось получить совет: {e}"
 
-            # ВАЖНО: после выдачи — кнопка расширенного остаётся (allow_three=True при активной подписке)
             await message.answer(
                 "✅ Подписка на 30 дней активирована.\n"
                 f"Доступ до: {_format_date_human(expires)}{note}\n\n"
                 + advice_text,
                 reply_markup=_advice_back_kb(allow_three=True)
             )
-            # очистим флаг
             await state.update_data(pending_advice_after_payment=None)
             return
 
-        # Обычная ветка — без немедленного совета
         await message.answer(
             "✅ Подписка на 30 дней активирована.\n"
-            f"Доступ до: {_format_date_human(expires)}\n"
-            f"Теперь можно пользоваться всем доступным функционалом."
-            f"{note}",
+            f"Доступ до: {_format_date_human(expires)}{note}\n"
+            f"Теперь можно пользоваться всем доступным функционалом.",
             reply_markup=main_menu_inline()
         )
-        # на всякий случай очистим флаг
         await state.update_data(pending_advice_after_payment=None)
         return
 
     # --- неизвестный payload ---
-    note = f"\nID платежа: {charge_id}" if charge_id else ""
     await message.answer(f"✅ Оплата получена.{note}", reply_markup=main_menu_inline())
 
 
